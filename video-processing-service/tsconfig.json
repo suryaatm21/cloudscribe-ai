@@ -7,5 +7,5 @@
       "strict": true,
       "esModuleInterop": true},
     "include": ["src/**/*.ts"],
-    "exclude": ["node_modules"]
+    "exclude": ["node_modules"] // can also include test files..
 }
