@@ -4,8 +4,8 @@ import ffmpeg from 'fluent-ffmpeg';
 
 const storage = new Storage();
 
-const rawVideoBucketName = "@muri-yt-raw-videos"; // must be globally unique
-const processedVideoBucketName = "@muri-yt-processed-videos"; // must be globally unique
+const rawVideoBucketName = "atmuri-yt-raw-videos"; // must be globally unique
+const processedVideoBucketName = "atmuri-yt-processed-videos"; // must be globally unique
 
 const localRawVideoPath = "./raw-videos";
 const localProcessedVideoPath = "./processed-videos";
