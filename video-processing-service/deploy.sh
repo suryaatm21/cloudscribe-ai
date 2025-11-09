@@ -19,9 +19,9 @@ echo "Project ID: $PROJECT_ID"
 echo "Region: $REGION"
 echo "Image: $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY_NAME/$SERVICE_NAME"
 
-# Build the Docker image
-echo "📦 Building Docker image..."
-docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY_NAME/$SERVICE_NAME .
+# Build the Docker image for linux/amd64 platform (required for Cloud Run)
+echo "📦 Building Docker image for linux/amd64..."
+docker build --platform linux/amd64 -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY_NAME/$SERVICE_NAME .
 
 if [ $? -ne 0 ]; then
   echo "❌ Docker build failed"
