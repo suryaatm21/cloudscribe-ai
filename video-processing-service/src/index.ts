@@ -30,12 +30,8 @@ app.post(
       data = decodePubSubMessage(req);
     } catch (error) {
       console.error('Error decoding message:', error);
-
-      if (error instanceof Error && error.message.includes('Bad Request')) {
-        sendBadRequestResponse(res, `Bad Request: ${error.message}`);
-      } else {
-        sendAcknowledgmentResponse(res);
-      }
+      // Always return 200 to prevent Pub/Sub from retrying malformed messages
+      sendAcknowledgmentResponse(res);
       return;
     }
 
@@ -44,10 +40,11 @@ app.post(
     const videoId = inputFileName.split('.')[0]; // Extract video ID from filename
 
     // Only process video if it's new, otherwise skip to avoid duplicates
+    // Return 200 (not 400) so Pub/Sub doesn't retry already-processed videos
     if (!(await isVideoNew(videoId))) {
-      sendBadRequestResponse(
+      sendSuccessResponse(
         res,
-        'Bad Request: video already processed or processing',
+        'Video already processed or processing - skipping',
       );
       return;
     }

@@ -21,7 +21,7 @@ export interface Video {
   id?: string;
   uid?: string;
   filename?: string;
-  status?: 'processing' | 'processed'; // solves the bug with Pub/Sub redelivery if Cloud Run instance is still processing the video, we want idempotency and to avoid duplicates
+  status?: 'processing' | 'processed' | 'failed'; // solves the bug with Pub/Sub redelivery if Cloud Run instance is still processing the video, we want idempotency and to avoid duplicates
   title?: string;
   description?: string;
 }

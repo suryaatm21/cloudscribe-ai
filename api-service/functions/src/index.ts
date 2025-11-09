@@ -10,6 +10,7 @@
 import * as functions from 'firebase-functions/v1';
 import { initializeApp } from 'firebase-admin/app';
 import { Firestore } from 'firebase-admin/firestore';
+import { getAuth } from 'firebase-admin/auth';
 import * as logger from 'firebase-functions/logger';
 import { Storage } from '@google-cloud/storage';
 import { onCall, onRequest } from 'firebase-functions/v2/https';
@@ -18,6 +19,7 @@ import * as cors from 'cors';
 initializeApp();
 
 const firestore = new Firestore();
+const adminAuth = getAuth();
 
 export const createUser = functions.auth.user().onCreate((user) => {
   const userInfo = {
@@ -74,24 +76,30 @@ export const getUploadUrl = onRequest(
     // Apply CORS middleware
     corsHandler(request, response, async () => {
       try {
-        // Check authentication (you'll need to implement proper auth validation)
         const authHeader = request.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-          response.status(401).send({ error: 'Unauthorized' });
+        if (!authHeader?.startsWith('Bearer ')) {
+          response.status(401).send({ error: 'Missing bearer token' });
           return;
         }
 
-        // Get file extension from query or body
+        const idToken = authHeader.split('Bearer ')[1];
+        let decodedToken;
+        try {
+          decodedToken = await adminAuth.verifyIdToken(idToken);
+        } catch (verifyError) {
+          logger.error('Invalid ID token for upload URL request', verifyError);
+          response.status(401).send({ error: 'Invalid token' });
+          return;
+        }
+
         const fileExtension =
-          request.query.extension ||
-          (request.body && request.body.fileExtension) ||
+          (request.query.extension as string) ||
+          request.body?.fileExtension ||
           'mp4';
 
-        // Generate a unique filename
-        const fileName = `user-${Date.now()}.${fileExtension}`;
+        const fileName = `${decodedToken.uid}-${Date.now()}.${fileExtension}`;
         const bucket = storage.bucket(rawVideoBucketName);
 
-        // Generate signed URL
         const [url] = await bucket.file(fileName).getSignedUrl({
           version: 'v4',
           action: 'write',

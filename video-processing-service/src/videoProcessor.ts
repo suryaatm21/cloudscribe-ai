@@ -20,34 +20,56 @@ export async function processVideo(
   outputFileName: string,
   videoId: string,
 ): Promise<void> {
-  try {
-    console.log(`Starting processing for file: ${inputFileName}`);
+  const parsedAttempts = Number(process.env.PROCESSING_MAX_ATTEMPTS);
+  const maxAttempts = Number.isFinite(parsedAttempts) && parsedAttempts > 0
+    ? parsedAttempts
+    : 3;
+  let attempt = 0;
+  let lastError: unknown;
 
-    await downloadRawVideo(inputFileName);
-    await convertVideo(inputFileName, outputFileName);
-    await uploadProcessedVideo(outputFileName);
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      console.log(
+        `Starting processing for file: ${inputFileName} (attempt ${attempt}/${maxAttempts})`,
+      );
 
-    // Update video status to processed in Firestore
-    await setVideo(videoId, {
-      status: 'processed',
-      filename: outputFileName,
-    });
+      await downloadRawVideo(inputFileName);
+      await convertVideo(inputFileName, outputFileName);
+      await uploadProcessedVideo(outputFileName);
 
-    // Clean up files after successful processing
-    await Promise.all([
-      deleteRawVideo(inputFileName),
-      deleteProcessedVideo(outputFileName),
-    ]);
+      await setVideo(videoId, {
+        status: 'processed',
+        filename: outputFileName,
+      });
 
-    console.log(`Successfully processed video: ${inputFileName}`);
-  } catch (err) {
-    console.error('Error during video processing:', err);
+      await Promise.all([
+        deleteRawVideo(inputFileName),
+        deleteProcessedVideo(outputFileName),
+      ]);
 
-    // Clean up any partial files
-    await cleanupFiles(inputFileName, outputFileName);
+      console.log(`Successfully processed video: ${inputFileName}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      console.error(
+        `Error during video processing (attempt ${attempt}/${maxAttempts}):`,
+        err,
+      );
+      await cleanupFiles(inputFileName, outputFileName);
 
-    throw err;
+      if (attempt < maxAttempts) {
+        console.log('Retrying video processing after failure...');
+      }
+    }
   }
+
+  await setVideo(videoId, { status: 'failed' });
+  const errorToThrow =
+    lastError instanceof Error
+      ? lastError
+      : new Error('Video processing failed after retries');
+  throw errorToThrow;
 }
 
 /**

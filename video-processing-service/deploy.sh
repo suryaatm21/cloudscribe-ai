@@ -53,6 +53,7 @@ gcloud run deploy $SERVICE_NAME \
   --min-instances=0 \
   --max-instances=1 \
   --ingress=internal \
+  --set-env-vars PROCESSING_MAX_ATTEMPTS=$PROCESSING_MAX_ATTEMPTS \
   --project=$PROJECT_ID
 
 if [ $? -ne 0 ]; then
