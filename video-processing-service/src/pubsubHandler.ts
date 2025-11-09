@@ -1,0 +1,83 @@
+import { Request, Response } from 'express';
+
+/**
+ * Represents the decoded message payload from Pub/Sub.
+ */
+export interface PubSubMessage {
+  name: string;
+  [key: string]: any;
+}
+
+/**
+ * Validates and decodes a Pub/Sub message from the request body.
+ * @param {Request} req - The Express request object.
+ * @returns {PubSubMessage} The decoded message payload.
+ * @throws {Error} If the message is invalid or missing required fields.
+ */
+export function decodePubSubMessage(req: Request): PubSubMessage {
+  // Ensure body.message.data exists (Pub/Sub format)
+  if (!req.body?.message?.data) {
+    throw new Error('No message data found in request');
+  }
+
+  const message = Buffer.from(req.body.message.data, 'base64').toString('utf8');
+  console.log('Decoded message:', message);
+
+  let data: PubSubMessage;
+  try {
+    data = JSON.parse(message);
+  } catch (parseError) {
+    throw new Error('Invalid JSON in message');
+  }
+
+  if (!data.name) {
+    throw new Error('Missing filename in payload');
+  }
+
+  return data;
+}
+
+/**
+ * Logs the incoming request for debugging purposes.
+ * @param {Request} req - The Express request object.
+ */
+export function logRequest(req: Request): void {
+  console.log(
+    'Received request:',
+    JSON.stringify(
+      {
+        headers: req.headers,
+        body: req.body,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+/**
+ * Sends a success response to acknowledge message processing.
+ * @param {Response} res - The Express response object.
+ * @param {string} message - The success message to send.
+ */
+export function sendSuccessResponse(res: Response, message: string): void {
+  res.status(200).send(message);
+}
+
+/**
+ * Sends an error response for bad requests.
+ * @param {Response} res - The Express response object.
+ * @param {string} message - The error message to send.
+ */
+export function sendBadRequestResponse(res: Response, message: string): void {
+  res.status(400).send(message);
+}
+
+/**
+ * Sends an acknowledgment response even when processing fails.
+ * This prevents Pub/Sub from retrying malformed or unprocessable messages.
+ * @param {Response} res - The Express response object.
+ */
+export function sendAcknowledgmentResponse(res: Response): void {
+  res.status(200).send('Message acknowledged, but processing failed');
+}

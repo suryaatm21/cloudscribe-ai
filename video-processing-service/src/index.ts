@@ -1,110 +1,76 @@
-import express, { Request, Response } from "express";
+import express, { Request, Response } from 'express';
+import { setupDirectories } from './storage';
+import { isVideoNew, setVideo } from './firestore';
+import { processVideo } from './videoProcessor';
 import {
-  downloadRawVideo,
-  convertVideo,
-  setupDirectories,
-  deleteRawVideo,
-  uploadProcessedVideo,
-  deleteProcessedVideo,
-} from "./storage";
+  decodePubSubMessage,
+  logRequest,
+  sendSuccessResponse,
+  sendBadRequestResponse,
+  sendAcknowledgmentResponse,
+} from './pubsubHandler';
 
 const app = express();
 app.use(express.json());
 
 setupDirectories();
 
+/**
+ * Endpoint to handle video processing requests from Pub/Sub.
+ * Receives a message, validates it, and processes the video.
+ */
 app.post(
-  "/process-video",
+  '/process-video',
   async (req: Request, res: Response): Promise<void> => {
-    // Log the incoming request for debugging
-    console.log(
-      "Received request:",
-      JSON.stringify(
-        {
-          headers: req.headers,
-          body: req.body,
-        },
-        null,
-        2
-      )
-    );
+    logRequest(req);
 
     let data;
 
     try {
-      // Ensure body.message.data exists (Pub/Sub format)
-      if (!req.body?.message?.data) {
-        console.error("No message data found in request");
-        res.status(400).send("Bad Request: missing message data");
-        return;
-      }
-
-      const message = Buffer.from(req.body.message.data, "base64").toString(
-        "utf8"
-      );
-      console.log("Decoded message:", message);
-
-      try {
-        data = JSON.parse(message);
-      } catch (parseError) {
-        console.error("Failed to parse message:", parseError);
-        res.status(400).send("Bad Request: invalid JSON in message");
-        return;
-      }
-
-      if (!data.name) {
-        console.error("No filename in message payload");
-        res.status(400).send("Bad Request: missing filename in payload");
-        return;
-      }
+      data = decodePubSubMessage(req);
     } catch (error) {
-      console.error("Error processing request:", error);
-      // Always return 200 for Pub/Sub to acknowledge the message was received
-      // even if we couldn't process it to prevent redelivery of malformed messages
-      res.status(200).send("Message acknowledged, but processing failed");
+      console.error('Error decoding message:', error);
+
+      if (error instanceof Error && error.message.includes('Bad Request')) {
+        sendBadRequestResponse(res, `Bad Request: ${error.message}`);
+      } else {
+        sendAcknowledgmentResponse(res);
+      }
       return;
     }
 
-    const inputFileName = data.name;
+    const inputFileName = data.name; // Format of <UID>-<DATE>.<EXTENSION>
     const outputFileName = `processed-${inputFileName}`;
+    const videoId = inputFileName.split('.')[0]; // Extract video ID from filename
+
+    // Only process video if it's new, otherwise skip to avoid duplicates
+    if (!(await isVideoNew(videoId))) {
+      sendBadRequestResponse(
+        res,
+        'Bad Request: video already processed or processing',
+      );
+      return;
+    }
+
+    // Set initial video status as processing
+    await setVideo(videoId, {
+      id: videoId,
+      uid: videoId.split('-')[0],
+      status: 'processing',
+    });
 
     try {
-      console.log(`Starting processing for file: ${inputFileName}`);
-      await downloadRawVideo(inputFileName);
-      await convertVideo(inputFileName, outputFileName);
-      await uploadProcessedVideo(outputFileName);
-
-      // Clean up files after successful processing
-      await Promise.all([
-        deleteRawVideo(inputFileName),
-        deleteProcessedVideo(outputFileName),
-      ]);
-
-      console.log(`Successfully processed video: ${inputFileName}`);
-      // Return 200 to acknowledge the message
-      res.status(200).send("Processing completed successfully");
+      await processVideo(inputFileName, outputFileName, videoId);
+      sendSuccessResponse(res, 'Processing completed successfully');
     } catch (err) {
-      console.error("Error during video processing:", err);
-
-      // Clean up any partial files
-      try {
-        await Promise.all([
-          deleteRawVideo(inputFileName),
-          deleteProcessedVideo(outputFileName),
-        ]);
-      } catch (cleanupErr) {
-        console.error("Error during cleanup:", cleanupErr);
-      }
-
-      // Still return 200 to acknowledge receipt of the message
-      // This prevents Pub/Sub from retrying failed messages
-      res.status(200).send("Message acknowledged, but processing failed");
+      console.error('Error during video processing:', err);
+      sendAcknowledgmentResponse(res);
     }
-  }
+  },
 );
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Video processing service running at http://localhost:${port}`);
-  console.log("Ready to process videos from Pub/Sub");
+  console.log('Ready to process videos from Pub/Sub');
 });
