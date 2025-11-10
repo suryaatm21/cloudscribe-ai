@@ -25,15 +25,23 @@ These services interact with the following Google Cloud services:
 
 ## 🧪 Testing Instructions
 
-To run the full application for testing, you will need to run each of the three main services in separate terminals.
+To test the full application, you need to deploy the backend services and run the web client.
 
-### 1. Run the API Service (Firebase Emulators)
+### Prerequisites
+- ✅ Video Processing Service is deployed to Cloud Run
+- ⏳ API Service (Firebase Functions) needs to be deployed
+- ⏳ Web Client needs to be running locally
 
-This will start the local Firebase emulators for Functions, Firestore, and Authentication.
+### 1. Deploy the API Service (Firebase Functions)
+
+Deploy the Firebase Functions to the cloud (not using emulators for production setup).
 
 ```bash
 cd api-service/functions
-npm run dev
+npm install
+npm run build
+cd ..
+firebase deploy --only functions
 ```
 
 ### 2. Run the Web Client
@@ -47,16 +55,18 @@ npm run dev
 
 The web client will be available at [http://localhost:3000](http://localhost:3000).
 
-### 3. Run the Video Processing Service
+### 3. Video Processing Service Status
 
-This will start the service that processes uploaded videos.
+✅ **Already Deployed to Cloud Run!**  
+The video processing service is running at: `https://video-processing-service-rfrkdig5jq-uc.a.run.app`
 
+It automatically processes videos when they're uploaded. No manual startup needed!
+
+To redeploy after changes:
 ```bash
 cd video-processing-service
-npm run start
+./deploy.sh
 ```
-
-This service runs on port 3001 to avoid conflicts with the web client.
 
 ## 🛣️ Next Steps
 
