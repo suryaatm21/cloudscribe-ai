@@ -28,6 +28,7 @@ These services interact with the following Google Cloud services:
 To test the full application, you need to deploy the backend services and run the web client.
 
 ### Prerequisites
+
 - ✅ Video Processing Service is deployed to Cloud Run
 - ⏳ API Service (Firebase Functions) needs to be deployed
 - ⏳ Web Client needs to be running locally
@@ -63,6 +64,7 @@ The video processing service is running at: `https://video-processing-service-rf
 It automatically processes videos when they're uploaded. No manual startup needed!
 
 To redeploy after changes:
+
 ```bash
 cd video-processing-service
 ./deploy.sh

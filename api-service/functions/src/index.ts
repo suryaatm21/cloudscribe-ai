@@ -21,6 +21,16 @@ initializeApp();
 const firestore = new Firestore();
 const adminAuth = getAuth();
 
+const videoCollectionId = "videos";
+export interface Video {
+  id?: string;
+  uid?: string;
+  filename?: string;
+  status?: "processing" | "processed";
+  title?: string;
+  description?: string;
+}
+
 export const createUser = functions.auth.user().onCreate((user) => {
   const userInfo = {
     uid: user.uid,
@@ -114,3 +124,19 @@ export const getUploadUrl = onRequest(
     });
   },
 );
+
+// TODO fix: naive endpoint to getVideos because no pagination / hardcoded
+// limit, and not checking if there are even videos
+export const getVideos = onCall({maxInstances: 1}, async (request) => {
+  if (!request.auth) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "The function must be called while authenticated.",
+    );
+  }
+  const querySnapshot = await firestore
+    .collection(videoCollectionId)
+    .limit(10)
+    .get();
+  return querySnapshot.docs.map((doc) => doc.data());
+});
