@@ -8,10 +8,9 @@ export default function Watch() {
     "https://storage.googleapis.com/atmuri-yt-processed-videos/";
 
   // use the hook to parse the URL and get the video filename
-  const videoSrc = useSearchParams().get("v");\
+  const videoSrc = useSearchParams().get("v");
 
-
-    // add the baseURl from the storage bucket to the video filename
+  // add the baseURl from the storage bucket to the video filename
   return (
     <div>
       <h1>Watch Page</h1>
