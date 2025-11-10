@@ -19,14 +19,21 @@ export default function Upload() {
   // Handle the file upload with the uploadVideo function we created in firebase/functions.ts and error handling
   const handleUpload = async (file: File) => {
     try {
+      // Show loading alert
+      console.log(`📤 Uploading ${file.name}...`);
+      
       const response = await uploadVideo(file);
+      
+      // Show success alert with details
       alert(
-        `File uploaded successfully. Server responded with: ${JSON.stringify(
-          response,
-        )}`,
+        `✅ ${response.message}\n\n` +
+        `📁 File: ${response.fileName}\n` +
+        `⏳ Your video is being processed. Check back in a few minutes!`
       );
     } catch (error) {
-      alert(`Failed to upload file: ${error}`);
+      // Show detailed error
+      console.error('Upload error:', error);
+      alert(`❌ Failed to upload file: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 

@@ -1,0 +1,56 @@
+# Cloud Build configuration for video-processing-service
+# Triggered automatically when you push to GitHub
+
+steps:
+  # Step 1: Build the Docker image for linux/amd64
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--platform=linux/amd64'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:$COMMIT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:latest'
+      - '.'
+    dir: 'video-processing-service'
+
+  # Step 2: Push the image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:$COMMIT_SHA'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:latest'
+
+  # Step 3: Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'video-processing-service'
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:$COMMIT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--timeout=3600'
+      - '--memory=2Gi'
+      - '--cpu=1'
+      - '--min-instances=0'
+      - '--max-instances=1'
+      - '--ingress=internal'
+      - '--set-env-vars=PROCESSING_MAX_ATTEMPTS=3'
+
+# Build timeout (10 minutes)
+timeout: '600s'
+
+# Substitutions for environment variables
+substitutions:
+  _REGION: 'us-central1'
+
+# Options
+options:
+  machineType: 'N1_HIGHCPU_8'  # Use a powerful build machine
+  logging: CLOUD_LOGGING_ONLY
