@@ -1,9 +1,9 @@
-'use client';
+"use client";
 
-import { Fragment } from 'react';
-import { uploadVideo } from '../firebase/functions';
+import { Fragment } from "react";
+import { uploadVideo } from "../firebase/functions";
 
-import styles from './upload.module.css';
+import styles from "./upload.module.css";
 
 export default function Upload() {
   // If the user selects a file, we will call the handleFileChange function
@@ -21,19 +21,21 @@ export default function Upload() {
     try {
       // Show loading alert
       console.log(`📤 Uploading ${file.name}...`);
-      
+
       const response = await uploadVideo(file);
-      
+
       // Show success alert with details
       alert(
         `✅ ${response.message}\n\n` +
-        `📁 File: ${response.fileName}\n` +
-        `⏳ Your video is being processed. Check back in a few minutes!`
+          `📁 File: ${response.fileName}\n` +
+          `⏳ Your video is being processed. Check back in a few minutes!`,
       );
     } catch (error) {
       // Show detailed error
-      console.error('Upload error:', error);
-      alert(`❌ Failed to upload file: ${error instanceof Error ? error.message : String(error)}`);
+      console.error("Upload error:", error);
+      alert(
+        `❌ Failed to upload file: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   };
 
@@ -54,7 +56,8 @@ export default function Upload() {
           viewBox="0 0 24 24"
           strokeWidth={1.5}
           stroke="currentColor"
-          className="size-6">
+          className="size-6"
+        >
           <path
             strokeLinecap="round"
             strokeLinejoin="round"

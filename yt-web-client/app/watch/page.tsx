@@ -2,8 +2,9 @@
 
 // this hook comes from Next.js13 so GPT may not be able to understand it given the cutoff of its training data in 2021
 import { useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 
-export default function Watch() {
+function WatchContent() {
   const videoPrefix =
     "https://storage.googleapis.com/atmuri-yt-processed-videos/";
 
@@ -14,7 +15,15 @@ export default function Watch() {
   return (
     <div>
       <h1>Watch Page</h1>
-      {<video controls src={videoPrefix + videoSrc} />}
+      <video controls src={videoPrefix + videoSrc} />
     </div>
+  );
+}
+
+export default function Watch() {
+  return (
+    <Suspense fallback={<div>Loading video...</div>}>
+      <WatchContent />
+    </Suspense>
   );
 }

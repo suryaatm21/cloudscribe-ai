@@ -26,7 +26,11 @@ export default function Home() {
   }, []);
 
   if (loading) {
-    return <main><p>Loading videos...</p></main>;
+    return (
+      <main>
+        <p>Loading videos...</p>
+      </main>
+    );
   }
 
   return (
