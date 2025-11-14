@@ -1,14 +1,20 @@
 import { Storage } from '@google-cloud/storage';
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
+import { serviceConfig } from './config';
+import { logger } from './logger';
 
 const storage = new Storage();
 
-const rawVideoBucketName = 'atmuri-yt-raw-videos'; // must be globally unique
-const processedVideoBucketName = 'atmuri-yt-processed-videos'; // must be globally unique
+const rawVideoBucketName = serviceConfig.rawVideoBucketName;
+const processedVideoBucketName = serviceConfig.processedVideoBucketName;
 
 const localRawVideoPath = './raw-videos';
 const localProcessedVideoPath = './processed-videos';
+
+export function getStorageClient(): Storage {
+  return storage;
+}
 
 /**
  * Ensures the existence of required directories for raw and processed videos.
@@ -29,11 +35,20 @@ export function convertVideo(rawVideoName: string, processedVideoName: string) {
     ffmpeg(`${localRawVideoPath}/${rawVideoName}`)
       .outputOptions('-vf', 'scale=-1:360')
       .on('end', () => {
-        console.log('Processing finished successfully');
+        logger.info('Video conversion finished', {
+          component: 'storage',
+          inputFile: rawVideoName,
+          outputFile: processedVideoName,
+        });
         resolve();
       })
       .on('error', (err) => {
-        console.log('Internal error occured');
+        logger.error('ffmpeg conversion error', {
+          component: 'storage',
+          inputFile: rawVideoName,
+          outputFile: processedVideoName,
+          error: err instanceof Error ? err.message : err,
+        });
         reject(err);
       })
       .save(`${localProcessedVideoPath}/${processedVideoName}`);
@@ -50,7 +65,11 @@ export async function downloadRawVideo(fileName: string) {
   await bucket.file(fileName).download({
     destination: `${localRawVideoPath}/${fileName}`,
   });
-  console.log(`Downloaded ${fileName} to ${localRawVideoPath}`);
+  logger.info('Downloaded raw video', {
+    component: 'storage',
+    fileName,
+    destination: localRawVideoPath,
+  });
 }
 
 /**
@@ -64,9 +83,11 @@ export async function uploadProcessedVideo(fileName: string) {
   await bucket.upload(`${localProcessedVideoPath}/${fileName}`, {
     destination: fileName,
   });
-  console.log(
-    `Uploaded ${fileName} to gs://${processedVideoBucketName}/${fileName}`,
-  );
+  logger.info('Uploaded processed video', {
+    component: 'storage',
+    fileName,
+    bucket: processedVideoBucketName,
+  });
   await bucket.file(fileName).makePublic();
 }
 
@@ -93,15 +114,25 @@ function deleteFile(filePath: string) {
     if (fs.existsSync(filePath)) {
       fs.unlink(filePath, (err) => {
         if (err) {
-          console.log(`Error deleting file: ${err}`);
+          logger.error('Error deleting file', {
+            component: 'storage',
+            filePath,
+            error: err instanceof Error ? err.message : err,
+          });
           reject(err);
         } else {
-          console.log(`Deleted file: ${filePath}`);
+          logger.info('Deleted temporary file', {
+            component: 'storage',
+            filePath,
+          });
           resolve();
         }
       });
     } else {
-      console.log(`File not found: ${filePath}`);
+      logger.debug('File not found during cleanup', {
+        component: 'storage',
+        filePath,
+      });
       resolve();
     }
   });
@@ -110,6 +141,9 @@ function deleteFile(filePath: string) {
 function ensureDirectoryExistence(dirPath: string) {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true }); // recursive: true enables creating nested directories
-    console.log(`Directory created at ${dirPath}`);
+    logger.info('Created local directory', {
+      component: 'storage',
+      dirPath,
+    });
   }
 }

@@ -6,6 +6,10 @@ initializeApp({ credential: credential.applicationDefault() });
 
 const firestore = new Firestore(); // only one firestore instance per GCP app so unnecessary to specify
 
+export function getFirestoreClient(): Firestore {
+  return firestore;
+}
+
 // The code snippet below is for local development with the Firestore emulator using a local Firestore instance.
 // Note: This requires setting an env variable in Cloud Run
 /** if (process.env.NODE_ENV !== 'production') {

@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { logger } from './logger';
 
 /**
  * Represents the decoded message payload from Pub/Sub.
@@ -6,6 +7,14 @@ import { Request, Response } from 'express';
 export interface PubSubMessage {
   name: string;
   [key: string]: any;
+}
+
+function getJobId(req: Request): string | undefined {
+  return (
+    req.body?.message?.messageId ||
+    req.headers['ce-id']?.toString() ||
+    req.headers['x-request-id']?.toString()
+  );
 }
 
 /**
@@ -20,8 +29,8 @@ export function decodePubSubMessage(req: Request): PubSubMessage {
     throw new Error('No message data found in request');
   }
 
+  const messageId = getJobId(req);
   const message = Buffer.from(req.body.message.data, 'base64').toString('utf8');
-  console.log('Decoded message:', message);
 
   let data: PubSubMessage;
   try {
@@ -34,6 +43,8 @@ export function decodePubSubMessage(req: Request): PubSubMessage {
     throw new Error('Missing filename in payload');
   }
 
+  logger.debug('Decoded Pub/Sub message', { jobId: messageId, payload: data });
+
   return data;
 }
 
@@ -42,17 +53,14 @@ export function decodePubSubMessage(req: Request): PubSubMessage {
  * @param {Request} req - The Express request object.
  */
 export function logRequest(req: Request): void {
-  console.log(
-    'Received request:',
-    JSON.stringify(
-      {
-        headers: req.headers,
-        body: req.body,
-      },
-      null,
-      2,
-    ),
-  );
+  const jobId = getJobId(req);
+  logger.info('Received Pub/Sub event', {
+    jobId,
+    component: 'pubsubHandler',
+    messageId: jobId,
+    subscription: req.headers['ce-subject'],
+    attributes: req.body?.message?.attributes,
+  });
 }
 
 /**
