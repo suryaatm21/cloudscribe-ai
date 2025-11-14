@@ -63,7 +63,7 @@ The web client will be available at [http://localhost:3000](http://localhost:300
 ✅ **Already Deployed to Cloud Run!**  
 The video processing service is running at: `https://video-processing-service-rfrkdig5jq-uc.a.run.app`
 
-It automatically processes videos when they're uploaded. No manual startup needed!
+It automatically processes videos when they're uploaded. No manual startup needed! A `/health` endpoint is exposed for uptime checks and dependency validation.
 
 To redeploy after changes:
 
@@ -71,6 +71,24 @@ To redeploy after changes:
 cd video-processing-service
 ./deploy.sh
 ```
+
+### 4. Run the Upload → Processing Smoke Test
+
+Use the scripted workflow to validate the upload ➜ Pub/Sub ➜ Cloud Run path end-to-end.
+
+1. Ensure you have: `curl`, `jq`, `gcloud`, `gsutil`, and a Firebase ID token for a valid user.
+2. Export the required environment variables (example below).
+
+```bash
+export SMOKE_PROJECT_ID=yt-clone-385f4
+export SMOKE_FUNCTIONS_URL=https://us-central1-yt-clone-385f4.cloudfunctions.net
+export SMOKE_ID_TOKEN="$(cat /path/to/firebase-id-token.txt)"
+export SMOKE_TEST_FILE=./sample-videos/demo.mp4
+export SMOKE_PROCESSED_BUCKET=atmuri-yt-processed-videos
+./scripts/smoke-test.sh
+```
+
+The script uploads the sample file, polls Firestore until status becomes `processed`, and confirms the processed object exists in Cloud Storage. Two consecutive successful runs satisfy the Sprint 01 stabilization acceptance criteria.
 
 ## 🛣️ Next Steps
 
@@ -86,5 +104,13 @@ Here are some potential next steps to continue development:
 ## 🐞 Known Bugs
 
 - **CORS Issues**: There have been some CORS-related issues between the web client and the Firebase Functions. While some fixes have been implemented, it's an area to keep an eye on.
+
+---
+
+📚 **Reference Docs**
+
+- `docs/environment-configuration.md` – env vars, service accounts, required APIs.
+- `docs/pubsub-iam-audit.md` – current Pub/Sub topology and IAM bindings.
+- `docs/monitoring-setup.md` – log-based alerts and uptime checks for `/health`.
 
 This document should give you a clear picture of where the project stands. Let me know if you have any other questions!
