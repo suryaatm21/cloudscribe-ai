@@ -84,6 +84,5 @@ Here are some potential next steps to continue development:
 ## 🐞 Known Bugs
 
 - **CORS Issues**: There have been some CORS-related issues between the web client and the Firebase Functions. While some fixes have been implemented, it's an area to keep an eye on.
-- **Port Conflict**: The video processing service was conflicting with the web client on port 3000. This has been resolved by moving the processing service to port 3001, but it's a good example of the kind of issue to watch for in a multi-service architecture.
 
 This document should give you a clear picture of where the project stands. Let me know if you have any other questions!
