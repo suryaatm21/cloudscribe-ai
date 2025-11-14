@@ -5,7 +5,11 @@
       "rootDir": "src",
       "outDir": "dist",
       "strict": true,
-      "esModuleInterop": true},
+      "esModuleInterop": true,
+      "types": ["node", "jest"],
+      "lib": ["es2020"],
+      "skipLibCheck": true
+    },
     "include": ["src/**/*.ts"],
     "exclude": ["node_modules"] // can also include test files..
 }
