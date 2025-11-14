@@ -4,10 +4,10 @@ import {
   deleteRawVideo,
   uploadProcessedVideo,
   deleteProcessedVideo,
-} from './storage';
-import { setVideo } from './firestore';
-import { serviceConfig } from './config';
-import { logger } from './logger';
+} from "./storage";
+import { setVideo } from "./firestore";
+import { serviceConfig } from "./config";
+import { logger } from "./logger";
 
 /**
  * Processes a video by downloading, converting, uploading, and updating its status.
@@ -29,9 +29,9 @@ export async function processVideo(
   while (attempt < maxAttempts) {
     attempt += 1;
     try {
-      logger.info('Starting video processing', {
+      logger.info("Starting video processing", {
         jobId: videoId,
-        component: 'videoProcessor',
+        component: "videoProcessor",
         attempt,
         maxAttempts,
         inputFileName,
@@ -43,7 +43,7 @@ export async function processVideo(
       await uploadProcessedVideo(outputFileName);
 
       await setVideo(videoId, {
-        status: 'processed',
+        status: "processed",
         filename: outputFileName,
       });
 
@@ -52,17 +52,17 @@ export async function processVideo(
         deleteProcessedVideo(outputFileName),
       ]);
 
-      logger.info('Successfully processed video', {
+      logger.info("Successfully processed video", {
         jobId: videoId,
-        component: 'videoProcessor',
+        component: "videoProcessor",
         inputFileName,
       });
       return;
     } catch (err) {
       lastError = err;
-      logger.error('Error during video processing', {
+      logger.error("Error during video processing", {
         jobId: videoId,
-        component: 'videoProcessor',
+        component: "videoProcessor",
         attempt,
         maxAttempts,
         error: err instanceof Error ? err.message : err,
@@ -70,23 +70,23 @@ export async function processVideo(
       await cleanupFiles(inputFileName, outputFileName);
 
       if (attempt < maxAttempts) {
-        logger.warn('Retrying video processing after failure', {
+        logger.warn("Retrying video processing after failure", {
           jobId: videoId,
-          component: 'videoProcessor',
+          component: "videoProcessor",
           nextAttempt: attempt + 1,
         });
       }
     }
   }
 
-  await setVideo(videoId, { status: 'failed' });
+  await setVideo(videoId, { status: "failed" });
   const errorToThrow =
     lastError instanceof Error
       ? lastError
-      : new Error('Video processing failed after retries');
-  logger.error('Exhausted video processing attempts', {
+      : new Error("Video processing failed after retries");
+  logger.error("Exhausted video processing attempts", {
     jobId: videoId,
-    component: 'videoProcessor',
+    component: "videoProcessor",
     attempts: maxAttempts,
     error: errorToThrow.message,
   });
@@ -109,14 +109,22 @@ async function cleanupFiles(
       deleteProcessedVideo(outputFileName),
     ]);
   } catch (cleanupErr) {
-    logger.error('Error during cleanup', {
-      component: 'videoProcessor',
-      jobId: videoIdFromFileNames(inputFileName),
+    logger.error("Error during cleanup", {
+      component: "videoProcessor",
+      jobId: videoIdFromFileNames(inputFileName) ?? "unknown",
       error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
     });
   }
 }
 
 function videoIdFromFileNames(inputFileName: string): string | undefined {
-  return inputFileName.split('.')[0];
+  if (!inputFileName) {
+    return undefined;
+  }
+  const segments = inputFileName.split(".");
+  if (segments.length <= 1) {
+    return inputFileName;
+  }
+  const candidate = segments.slice(0, -1).join(".");
+  return candidate.length > 0 ? candidate : inputFileName;
 }

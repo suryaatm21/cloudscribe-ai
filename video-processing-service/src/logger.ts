@@ -11,22 +11,13 @@ interface ILoggerContext {
 function emitLog(level: LogLevel, message: string, context?: ILoggerContext): void {
   const logPayload = {
     level,
+    severity: level.toUpperCase(),
     message,
     timestamp: new Date().toISOString(),
     service: serviceConfig.serviceName ?? "video-processing-service",
     environment: serviceConfig.environment,
     ...context,
   };
-
-  if (level === "error") {
-    console.error(JSON.stringify(logPayload));
-    return;
-  }
-
-  if (level === "warn") {
-    console.warn(JSON.stringify(logPayload));
-    return;
-  }
 
   console.log(JSON.stringify(logPayload));
 }

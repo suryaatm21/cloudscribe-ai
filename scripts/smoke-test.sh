@@ -26,6 +26,17 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required"; exit 1; }
 command -v gcloud >/dev/null 2>&1 || { echo "gcloud CLI is required"; exit 1; }
 command -v gsutil >/dev/null 2>&1 || { echo "gsutil is required"; exit 1; }
 
+function cleanup() {
+  if [[ -n "${FILE_NAME:-}" ]]; then
+    gsutil rm -f "gs://${RAW_BUCKET}/${FILE_NAME}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${PROCESSED_OBJECT:-}" ]]; then
+    gsutil rm -f "${PROCESSED_OBJECT}" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT
+
 function section() {
   printf "\n==== %s ====\n" "$1"
 }
@@ -76,7 +87,7 @@ if ! gsutil ls "$PROCESSED_OBJECT" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "\n✅ Smoke test succeeded"
+printf "\n✅ Smoke test succeeded\n"
 echo "Video ID: ${VIDEO_ID}"
 echo "Processed object: ${PROCESSED_OBJECT}"
 echo "Raw bucket: gs://${RAW_BUCKET}/${FILE_NAME}"

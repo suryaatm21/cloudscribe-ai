@@ -24,6 +24,7 @@ Both trigger on push to `main` branch.
 ## Configuration
 
 ### Triggers
+
 - Event: **Push to a branch**
 - Branch (regex): `^main$`
 - Configuration: **Cloud Build configuration file**
@@ -33,6 +34,7 @@ Both trigger on push to `main` branch.
 - Service account: `262816123746-compute@developer.gserviceaccount.com`
 
 ### IAM Permissions (Applied)
+
 - `roles/run.admin` — Deploy to Cloud Run
 - `roles/iam.serviceAccountUser` — Act as service account
 

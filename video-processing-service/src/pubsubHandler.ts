@@ -1,5 +1,6 @@
-import { Request, Response } from 'express';
-import { logger } from './logger';
+import { Request, Response } from "express";
+import { serviceConfig } from "./config";
+import { logger } from "./logger";
 
 /**
  * Represents the decoded message payload from Pub/Sub.
@@ -12,8 +13,8 @@ export interface PubSubMessage {
 function getJobId(req: Request): string | undefined {
   return (
     req.body?.message?.messageId ||
-    req.headers['ce-id']?.toString() ||
-    req.headers['x-request-id']?.toString()
+    req.headers["ce-id"]?.toString() ||
+    req.headers["x-request-id"]?.toString()
   );
 }
 
@@ -26,24 +27,26 @@ function getJobId(req: Request): string | undefined {
 export function decodePubSubMessage(req: Request): PubSubMessage {
   // Ensure body.message.data exists (Pub/Sub format)
   if (!req.body?.message?.data) {
-    throw new Error('No message data found in request');
+    throw new Error("No message data found in request");
   }
 
-  const messageId = getJobId(req);
-  const message = Buffer.from(req.body.message.data, 'base64').toString('utf8');
+  const messageId = getJobId(req) ?? "unknown";
+  const message = Buffer.from(req.body.message.data, "base64").toString("utf8");
 
   let data: PubSubMessage;
   try {
     data = JSON.parse(message);
   } catch (parseError) {
-    throw new Error('Invalid JSON in message');
+    throw new Error("Invalid JSON in message");
   }
 
   if (!data.name) {
-    throw new Error('Missing filename in payload');
+    throw new Error("Missing filename in payload");
   }
 
-  logger.debug('Decoded Pub/Sub message', { jobId: messageId, payload: data });
+  if (serviceConfig.environment !== "production") {
+    logger.debug("Decoded Pub/Sub message", { jobId: messageId, payload: data });
+  }
 
   return data;
 }
@@ -54,11 +57,10 @@ export function decodePubSubMessage(req: Request): PubSubMessage {
  */
 export function logRequest(req: Request): void {
   const jobId = getJobId(req);
-  logger.info('Received Pub/Sub event', {
-    jobId,
-    component: 'pubsubHandler',
-    messageId: jobId,
-    subscription: req.headers['ce-subject'],
+  logger.info("Received Pub/Sub event", {
+    jobId: jobId ?? "unknown",
+    component: "pubsubHandler",
+    subscription: req.headers["ce-subject"],
     attributes: req.body?.message?.attributes,
   });
 }
@@ -87,5 +89,5 @@ export function sendBadRequestResponse(res: Response, message: string): void {
  * @param {Response} res - The Express response object.
  */
 export function sendAcknowledgmentResponse(res: Response): void {
-  res.status(200).send('Message acknowledged, but processing failed');
+  res.status(200).send("Message acknowledged, but processing failed");
 }

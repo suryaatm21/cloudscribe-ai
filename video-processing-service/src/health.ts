@@ -30,7 +30,7 @@ async function checkFirestore(): Promise<IDependencyCheckResult> {
   const start = Date.now();
   try {
     const client = getFirestoreClient();
-    await client.listCollections();
+    await client.collection("videos").limit(1).get();
     return { status: "pass", latencyMs: Date.now() - start };
   } catch (error) {
     return {
@@ -64,11 +64,18 @@ async function checkBucket(bucketName: string): Promise<IDependencyCheckResult> 
 }
 
 function deriveOverallStatus(checks: IDependencyCheckResult[]): OverallStatus {
-  const hasFailure = checks.some((check) => check.status === "fail");
-  if (hasFailure) {
+  const totalChecks = checks.length;
+  const failedChecks = checks.filter((check) => check.status === "fail").length;
+
+  if (failedChecks === 0) {
+    return "ok";
+  }
+
+  if (failedChecks === totalChecks) {
     return "unhealthy";
   }
-  return "ok";
+
+  return "degraded";
 }
 
 export async function buildHealthResponse(): Promise<IHealthResponse> {

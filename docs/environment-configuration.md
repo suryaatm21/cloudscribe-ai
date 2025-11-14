@@ -18,6 +18,7 @@ This document captures all required environment variables, service accounts, and
 | `GOOGLE_APPLICATION_CREDENTIALS` | ➖ | – | Path to service account JSON when running locally |
 | `SMOKE_ID_TOKEN` | ➖ | – | Firebase ID token for smoke test authentication |
 | `SMOKE_FUNCTIONS_URL` | ➖ | – | Base URL to Firebase Functions endpoint (for smoke test) |
+| `RUN_LOCAL_TESTS` | ➖ | `false` | Set to `true` to run npm build/tests inside `deploy.sh` before container builds |
 
 **Required APIs**
 
@@ -78,7 +79,7 @@ This document captures all required environment variables, service accounts, and
 
 ## Validation Checklist
 
-1. Copy the corresponding `.env.example` file for each service and populate required fields.
+1. Copy the corresponding `.env.example` file (kept beside each service, e.g., `video-processing-service/.env`) and populate required fields.
 2. Run `npm test` inside `video-processing-service` to ensure env-dependent logic passes.
 3. Execute `./video-processing-service/deploy.sh` to verify deploy script uses the documented variables.
 4. Run `firebase functions:config:get` to confirm Firebase functions have matching values.

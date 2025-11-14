@@ -38,22 +38,22 @@ steps:
 
   # Step 3: Deploy to Cloud Run
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    entrypoint: gcloud
+    entrypoint: "bash"
     args:
-      - "run"
-      - "deploy"
-      - "video-processing-service"
-      - "--image=us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:$COMMIT_SHA"
-      - "--region=us-central1"
-      - "--platform=managed"
-      - "--timeout=3600"
-      - "--memory=2Gi"
-      - "--cpu=1"
-      - "--min-instances=0"
-      - "--max-instances=1"
-      - "--ingress=internal"
-      - "--set-env-vars=PROCESSING_MAX_ATTEMPTS=3"
-      - "--labels=commit=$COMMIT_SHA"
+      - "-c"
+      - |
+        gcloud run deploy "video-processing-service" \
+          --image="us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:${COMMIT_SHA:-unknown}" \
+          --region="us-central1" \
+          --platform="managed" \
+          --timeout=3600 \
+          --memory=2Gi \
+          --cpu=1 \
+          --min-instances=0 \
+          --max-instances=1 \
+          --ingress="internal" \
+          --set-env-vars="PROCESSING_MAX_ATTEMPTS=3" \
+          --labels="commit=${COMMIT_SHA:-unknown}"
 
 # Build timeout (10 minutes)
 timeout: "600s"
