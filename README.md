@@ -10,6 +10,8 @@ The project is currently in a state where the main components are functional, bu
 
 ## 🏗️ Project Architecture
 
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/fbc9b1eb-180d-424f-91da-e0a17e091d4e" />
+
 The project is a monorepo composed of three main services:
 
 1.  **`yt-web-client`**: A [Next.js](https://nextjs.org/) frontend that provides the user interface for video upload and viewing. It handles user authentication via Firebase.
