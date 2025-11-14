@@ -2,6 +2,17 @@
 # Triggered automatically when you push to GitHub
 
 steps:
+  # Step 0: Install dependencies, build, and run tests before building the Docker image
+  - name: "gcr.io/cloud-builders/npm"
+    dir: "video-processing-service"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        npm install
+        npm run build
+        npm test
+
   # Step 1: Build the Docker image for linux/amd64
   - name: "gcr.io/cloud-builders/docker"
     args:
@@ -42,6 +53,7 @@ steps:
       - "--max-instances=1"
       - "--ingress=internal"
       - "--set-env-vars=PROCESSING_MAX_ATTEMPTS=3"
+      - "--labels=commit=$COMMIT_SHA"
 
 # Build timeout (10 minutes)
 timeout: "600s"

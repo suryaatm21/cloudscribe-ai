@@ -1,51 +1,55 @@
 #!/bin/bash
+set -euo pipefail
 
-# Load environment variables from .env file
-if [ -f ../.env ]; then
-  export $(cat ../.env | grep -v '^#' | xargs)
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+ENV_FILE="${PROJECT_ROOT}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
 else
-  echo "Error: .env file not found in parent directory"
+  echo "Error: .env file not found at ${ENV_FILE}"
   exit 1
 fi
 
-# Check if PROJECT_ID is set
-if [ -z "$PROJECT_ID" ]; then
-  echo "Error: PROJECT_ID not set in .env file"
-  exit 1
-fi
+: "${PROJECT_ID:?Error: PROJECT_ID is required in .env}"
+REGION="${REGION:-us-central1}"
+REPOSITORY_NAME="${REPOSITORY_NAME:-video-processing-service}"
+SERVICE_NAME="${SERVICE_NAME:-video-processing-service}"
+PROCESSING_MAX_ATTEMPTS="${PROCESSING_MAX_ATTEMPTS:-3}"
+
+IMAGE_BASE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY_NAME}/${SERVICE_NAME}"
+GIT_SHA="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD)"
+IMAGE_SHA_TAG="${IMAGE_BASE}:${GIT_SHA}"
+IMAGE_LATEST_TAG="${IMAGE_BASE}:latest"
 
 echo "🚀 Starting deployment process..."
-echo "Project ID: $PROJECT_ID"
-echo "Region: $REGION"
-echo "Image: $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY_NAME/$SERVICE_NAME"
+echo "Project ID: ${PROJECT_ID}"
+echo "Region: ${REGION}"
+echo "Deploying commit: ${GIT_SHA}"
+echo "Target image: ${IMAGE_SHA_TAG}"
 
-# Build the Docker image for linux/amd64 platform (required for Cloud Run)
+cd "${SCRIPT_DIR}"
+
+echo "🧪 Running build and test suite..."
+npm install
+npm run build
+npm test
+
 echo "📦 Building Docker image for linux/amd64..."
-docker build --platform linux/amd64 -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY_NAME/$SERVICE_NAME .
+docker build --platform linux/amd64 -t "${IMAGE_SHA_TAG}" -t "${IMAGE_LATEST_TAG}" .
 
-if [ $? -ne 0 ]; then
-  echo "❌ Docker build failed"
-  exit 1
-fi
+echo "⬆️  Pushing image tags to Artifact Registry..."
+docker push "${IMAGE_SHA_TAG}"
+docker push "${IMAGE_LATEST_TAG}"
 
-echo "✅ Docker build successful"
-
-# Push the image to Artifact Registry
-echo "⬆️  Pushing image to Artifact Registry..."
-docker push $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY_NAME/$SERVICE_NAME
-
-if [ $? -ne 0 ]; then
-  echo "❌ Docker push failed"
-  exit 1
-fi
-
-echo "✅ Image pushed successfully"
-
-# Deploy to Cloud Run
 echo "☁️  Deploying to Cloud Run..."
-gcloud run deploy $SERVICE_NAME \
-  --image $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY_NAME/$SERVICE_NAME \
-  --region=$REGION \
+gcloud run deploy "${SERVICE_NAME}" \
+  --image "${IMAGE_SHA_TAG}" \
+  --region="${REGION}" \
   --platform managed \
   --timeout=3600 \
   --memory=2Gi \
@@ -53,13 +57,9 @@ gcloud run deploy $SERVICE_NAME \
   --min-instances=0 \
   --max-instances=1 \
   --ingress=internal \
-  --set-env-vars PROCESSING_MAX_ATTEMPTS=$PROCESSING_MAX_ATTEMPTS \
-  --project=$PROJECT_ID
-
-if [ $? -ne 0 ]; then
-  echo "❌ Cloud Run deployment failed"
-  exit 1
-fi
+  --set-env-vars "PROCESSING_MAX_ATTEMPTS=${PROCESSING_MAX_ATTEMPTS}" \
+  --project="${PROJECT_ID}"
 
 echo "✅ Deployment successful!"
+echo "📌 Deployed image tag: ${IMAGE_SHA_TAG}"
 echo "🎉 Video processing service is now live!"
