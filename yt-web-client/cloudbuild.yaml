@@ -1,0 +1,46 @@
+# Cloud Build configuration for web-client
+# Triggered automatically when you push to GitHub
+
+steps:
+  # Step 1: Build the Docker image for linux/amd64
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "--platform=linux/amd64"
+      - "-t"
+      - "us-central1-docker.pkg.dev/$PROJECT_ID/yt-web-client-repo/yt-web-client:$COMMIT_SHA"
+      - "-t"
+      - "us-central1-docker.pkg.dev/$PROJECT_ID/yt-web-client-repo/yt-web-client:latest"
+      - "."
+    dir: "yt-web-client"
+
+  # Step 2: Push the image to Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "us-central1-docker.pkg.dev/$PROJECT_ID/yt-web-client-repo/yt-web-client:$COMMIT_SHA"
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "us-central1-docker.pkg.dev/$PROJECT_ID/yt-web-client-repo/yt-web-client:latest"
+
+  # Step 3: Deploy to Cloud Run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "cloudscribe-ai"
+      - "--image=us-central1-docker.pkg.dev/$PROJECT_ID/yt-web-client-repo/yt-web-client:$COMMIT_SHA"
+      - "--region=us-central1"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+
+# Build timeout (15 minutes for Next.js build)
+timeout: "900s"
+
+# Options
+options:
+  machineType: "N1_HIGHCPU_8" # Use a powerful build machine for faster Next.js builds
+  logging: CLOUD_LOGGING_ONLY

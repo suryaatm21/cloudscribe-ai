@@ -25,9 +25,16 @@
 - **Potential Solution:**
   - Use a shared types package (e.g., `utils/types/video.ts`) and import it everywhere (backend, frontend, functions) for end-to-end type safety.
 
-## Video ID Strategy
+## Video ID/Processing Strategy
 
 - **Current:** The full filename is used as the video ID, so the watch page can render the video directly.
 - **Tradeoff:** Filenames can be long and unwieldy; exposes internal structure.
 - **Potential Solution:**
   - Use a short, unique `videoId` (e.g., UUID or Firestore doc ID) and map it to the filename in Firestore. This requires more work but is more robust.
+- When we are processing a video, we don't handle that in our web client and still show a thumbnail. 
+
+## Continuous Deployment 
+
+- Setup Google Cloud Build with GitHub repo so for any changes we can just PR and when changes are merged in it builds a new container and deploys it to cloud run 
+    - Provide instructions to create the trigger 
+
