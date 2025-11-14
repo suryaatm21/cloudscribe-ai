@@ -44,7 +44,8 @@ export const createUser = functions.auth.user().onCreate((user) => {
 });
 
 const storage = new Storage();
-const rawVideoBucketName = "atmuri-yt-raw-videos";
+const rawVideoBucketName =
+  process.env.RAW_VIDEO_BUCKET_NAME ?? "atmuri-yt-raw-videos";
 
 // Set up CORS middleware with appropriate options
 const corsHandler = cors({
