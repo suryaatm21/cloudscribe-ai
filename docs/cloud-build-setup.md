@@ -1,40 +1,54 @@
 # Cloud Build + GitHub Integration
 
-Set up the trigger after the end-to-end upload pipeline is stable and manual deploys are no longer needed for debugging. Automating too early makes it harder to diagnose issues.
+✅ **Now Implemented!** Continuous Deployment is active.
 
-- NOT YET IMPLEMENTED
+## Triggers Active
 
-## Prerequisites
+Two Cloud Build triggers are now deployed and monitoring the `cloudscribe-ai` repository:
 
-- `video-processing-service/cloudbuild.yaml` committed on `main`.
-- Service account permissions: Cloud Build needs to deploy Cloud Run and push to Artifact Registry (roles/cloudbuild.builds.editor, roles/run.admin, roles/artifactregistry.writer).
-- GitHub repository owner admin access.
+1. **`video-processing-service`** → Deploys `video-processing-service` Cloud Run service
+2. **`web-client`** → Deploys `cloudscribe-ai` Cloud Run service
 
-## One-Time GCP Configuration
+Both trigger on push to `main` branch.
 
-1. Open https://console.cloud.google.com/cloud-build (project `yt-clone-385f4`).
-2. Enable Cloud Build API if prompted.
-3. Connect repository: **Triggers → Manage Repositories → Connect Repository → GitHub → Authorize**.
-4. Select `suryaatm21/cloudscribe-ai` and confirm access.
+## How It Works
 
-## Create the Trigger
+1. You commit and push code to `main` on GitHub
+2. Cloud Build detects the push and triggers the appropriate service's build
+3. Build steps:
+   - Build Docker image for `linux/amd64`
+   - Push to Artifact Registry
+   - Deploy to Cloud Run
+4. New revision goes live automatically
 
-1. In Cloud Build, click **Create Trigger**.
-2. Name: `video-processing-deploy`.
-3. Event: **Push to a branch**; Branch (regex): `^main$`.
-4. Configuration: **Cloud Build configuration file**.
-5. Location: `video-processing-service/cloudbuild.yaml`.
-6. Substitutions: leave default (`_REGION` already set in the file).
-7. Service account: choose a principal with Cloud Run deploy + Artifact Registry permissions (or accept default and grant roles).
-8. Save.
+## Configuration
 
-## Test the Trigger
+### Triggers
+- Event: **Push to a branch**
+- Branch (regex): `^main$`
+- Configuration: **Cloud Build configuration file**
+- Locations:
+  - `video-processing-service/cloudbuild.yaml`
+  - `yt-web-client/cloudbuild.yaml`
+- Service account: `262816123746-compute@developer.gserviceaccount.com`
 
-1. Commit a trivial change under `video-processing-service/`.
-2. Push to `main` or open a PR that merges into `main`.
-3. Monitor progress under **Cloud Build → History**. On success, Cloud Run deploys the new revision automatically.
+### IAM Permissions (Applied)
+- `roles/run.admin` — Deploy to Cloud Run
+- `roles/iam.serviceAccountUser` — Act as service account
+
+## Test the Triggers
+
+1. Make a small change to any file in either service directory
+2. Commit and push to `main`:
+   ```bash
+   git add .
+   git commit -m "test: ci/cd trigger"
+   git push origin main
+   ```
+3. Monitor the build: https://console.cloud.google.com/cloud-build/builds?project=yt-clone-385f4
+4. Once the build succeeds, verify the service deployed: https://console.cloud.google.com/run?project=yt-clone-385f4
 
 ## Rollback Strategy
 
-- Use Cloud Run revisions to roll back if a bad build ships (`Deployments → Manage revisions → Roll back`).
-- Disable the trigger temporarily from Cloud Build if you need to pause automated deploys.
+- Use Cloud Run revisions to roll back if a bad build ships (`Deployments → Manage revisions → Roll back`)
+- Disable the trigger temporarily from Cloud Build if you need to pause automated deploys

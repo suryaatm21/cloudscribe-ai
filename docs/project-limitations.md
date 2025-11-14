@@ -35,6 +35,13 @@
 
 ## Continuous Deployment 
 
-- Setup Google Cloud Build with GitHub repo so for any changes we can just PR and when changes are merged in it builds a new container and deploys it to cloud run 
-    - Provide instructions to create the trigger 
+✅ **Complete!** Cloud Build CI/CD is now active.
+
+- Two triggers created: `video-processing-service` and `web-client`
+- Both trigger on push to `main` branch
+- Automatic build, push to Artifact Registry, and deploy to Cloud Run
+- Services deployed:
+  - `video-processing-service` → Cloud Run service `video-processing-service`
+  - `web-client` → Cloud Run service `cloudscribe-ai`
+- Monitor builds: https://console.cloud.google.com/cloud-build/builds?project=yt-clone-385f4 
 
