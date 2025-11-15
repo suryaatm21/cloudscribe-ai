@@ -1,5 +1,6 @@
-import { Request, Response } from "express";
+import { Request } from "express";
 import { decodePubSubMessage, logRequest } from "../pubsubHandler";
+import { logger } from "../logger";
 
 jest.mock("../logger", () => ({
   logger: {
@@ -59,7 +60,6 @@ describe("pubsubHandler", () => {
 
     logRequest(req);
 
-    const logger = require("../logger").logger;
     expect(logger.info).toHaveBeenCalledWith(
       "Received Pub/Sub event",
       expect.objectContaining({

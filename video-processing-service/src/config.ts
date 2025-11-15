@@ -29,7 +29,7 @@ function getNumericEnvVar(key: string, fallback: number): number {
     return fallback;
   }
   const parsed = Number(rawValue);
-  if (Number.isFinite(parsed) && parsed > 0) {
+  if (Number.isFinite(parsed) && parsed >= 0) {
     return parsed;
   }
   return fallback;
