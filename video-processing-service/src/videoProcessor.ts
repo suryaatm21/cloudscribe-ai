@@ -4,10 +4,20 @@ import {
   deleteRawVideo,
   uploadProcessedVideo,
   deleteProcessedVideo,
+  extractAudio,
+  uploadAudioForTranscription,
+  deleteAudioWorkFile,
 } from "./storage";
-import { setVideo } from "./firestore";
+import {
+  createTranscript,
+  setVideo,
+  updateTranscriptStatus,
+} from "./firestore";
 import { serviceConfig } from "./config";
 import { logger } from "./logger";
+import { publishTranscriptionJob } from "./transcriptionQueue";
+
+const DEFAULT_TRANSCRIPT_ID = "primary";
 
 /**
  * Processes a video by downloading, converting, uploading, and updating its status.
@@ -29,9 +39,9 @@ export async function processVideo(
   while (attempt < maxAttempts) {
     attempt += 1;
     try {
-      logger.info("Starting video processing", {
+      logger.info('Starting video processing', {
         jobId: videoId,
-        component: "videoProcessor",
+        component: 'videoProcessor',
         attempt,
         maxAttempts,
         inputFileName,
@@ -46,6 +56,19 @@ export async function processVideo(
         status: "processed",
         filename: outputFileName,
       });
+
+      if (serviceConfig.enableTranscription) {
+        // Extract userId from videoId (format: {userId}-{timestamp}-{random})
+        const userId = videoId.split("-")[0];
+        if (!userId) {
+          logger.error("Cannot extract userId from videoId", {
+            component: "videoProcessor",
+            videoId,
+          });
+        } else {
+          await triggerTranscriptionPipeline(videoId, outputFileName, userId);
+        }
+      }
 
       await Promise.all([
         deleteRawVideo(inputFileName),
@@ -111,20 +134,71 @@ async function cleanupFiles(
   } catch (cleanupErr) {
     logger.error("Error during cleanup", {
       component: "videoProcessor",
-      jobId: videoIdFromFileNames(inputFileName) ?? "unknown",
+      jobId: videoIdFromFileNames(inputFileName),
       error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
     });
   }
 }
 
 function videoIdFromFileNames(inputFileName: string): string | undefined {
-  if (!inputFileName) {
-    return undefined;
-  }
-  const segments = inputFileName.split(".");
-  if (segments.length <= 1) {
-    return inputFileName;
-  }
-  const candidate = segments.slice(0, -1).join(".");
-  return candidate.length > 0 ? candidate : inputFileName;
+  return inputFileName.split(".")[0];
 }
+
+/**
+ * Triggers the asynchronous transcription pipeline for a processed video.
+ * @param videoId - The unique video identifier
+ * @param processedFileName - The processed video filename
+ * @param userId - The user ID who owns the video
+ */
+async function triggerTranscriptionPipeline(
+  videoId: string,
+  processedFileName: string,
+  userId: string,
+) {
+  const transcriptId = DEFAULT_TRANSCRIPT_ID;
+  const audioFileName = `${videoId}.flac`;
+
+  try {
+    await extractAudio(processedFileName, audioFileName);
+    const audioGcsUri = await uploadAudioForTranscription(audioFileName);
+
+    await createTranscript(videoId, transcriptId, {
+      status: "pending",
+      language: serviceConfig.speechToTextLanguage,
+      model: serviceConfig.speechToTextModel,
+      audioGcsUri,
+      userId,
+    });
+
+    await publishTranscriptionJob({
+      videoId,
+      transcriptId,
+      audioGcsUri,
+      userId,
+    });
+
+    await updateTranscriptStatus(videoId, transcriptId, "running");
+    logger.info("Queued transcription job", {
+      component: "videoProcessor",
+      videoId,
+      transcriptId,
+    });
+
+    // Note: Audio file cleanup deferred to /transcribe-audio endpoint
+    // to avoid race condition where file is deleted before Speech-to-Text reads it
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("Failed to queue transcription job", {
+      component: "videoProcessor",
+      videoId,
+      transcriptId,
+      error: message,
+    });
+    await updateTranscriptStatus(videoId, transcriptId, "failed", {
+      error: message,
+    });
+    // Clean up audio file only if job publication failed
+    await deleteAudioWorkFile(audioFileName);
+  }
+}
+

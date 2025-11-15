@@ -1,6 +1,9 @@
-import { credential } from 'firebase-admin';
-import { initializeApp } from 'firebase-admin/app';
-import { Firestore } from 'firebase-admin/firestore';
+import { credential } from "firebase-admin";
+import { initializeApp } from "firebase-admin/app";
+import {
+  Firestore,
+  Timestamp,
+} from "firebase-admin/firestore";
 
 initializeApp({ credential: credential.applicationDefault() });
 
@@ -19,15 +22,35 @@ export function getFirestoreClient(): Firestore {
   });
 } */
 
-const videoCollectionId = 'videos';
+const videoCollectionId = "videos";
+const transcriptCollectionId = "transcripts";
 
 export interface Video {
   id?: string;
   uid?: string;
   filename?: string;
-  status?: 'processing' | 'processed' | 'failed'; // solves the bug with Pub/Sub redelivery if Cloud Run instance is still processing the video, we want idempotency and to avoid duplicates
+  status?: "processing" | "processed" | "failed"; // solves the bug with Pub/Sub redelivery if Cloud Run instance is still processing the video, we want idempotency and to avoid duplicates
   title?: string;
   description?: string;
+}
+
+export type TranscriptStatus = "pending" | "running" | "failed" | "done";
+
+export interface TranscriptDocument {
+  id?: string;
+  videoId: string;
+  status: TranscriptStatus;
+  gcsPath?: string;
+  segmentCount?: number;
+  durationSeconds?: number;
+  language: string;
+  model: string;
+  createdAt?: Timestamp;
+  completedAt?: Timestamp;
+  error?: string;
+  operationName?: string;
+  audioGcsUri?: string;
+  userId?: string;
 }
 
 /**
@@ -68,4 +91,68 @@ export function setVideo(videoId: string, video: Video) {
 export async function isVideoNew(videoId: string) {
   const video = await getVideo(videoId);
   return video?.status === undefined;
+}
+
+function transcriptCollection(videoId: string) {
+  return firestore
+    .collection(videoCollectionId)
+    .doc(videoId)
+    .collection(transcriptCollectionId);
+}
+
+export function transcriptRef(videoId: string, transcriptId: string) {
+  return transcriptCollection(videoId).doc(transcriptId);
+}
+
+export async function createTranscript(
+  videoId: string,
+  transcriptId: string,
+  payload: Omit<TranscriptDocument, "id" | "videoId">,
+) {
+  await transcriptRef(videoId, transcriptId).set(
+    {
+      ...payload,
+      videoId,
+      createdAt: payload.createdAt ?? Timestamp.now(),
+    },
+    { merge: true },
+  );
+}
+
+export async function getTranscript(
+  videoId: string,
+  transcriptId: string,
+): Promise<TranscriptDocument | undefined> {
+  const snapshot = await transcriptRef(videoId, transcriptId).get();
+  if (!snapshot.exists) {
+    return undefined;
+  }
+  return {
+    id: snapshot.id,
+    ...(snapshot.data() as Omit<TranscriptDocument, "id">),
+  };
+}
+
+export async function updateTranscript(
+  videoId: string,
+  transcriptId: string,
+  mutation: Partial<TranscriptDocument>,
+) {
+  await transcriptRef(videoId, transcriptId).set(mutation, { merge: true });
+}
+
+export async function updateTranscriptStatus(
+  videoId: string,
+  transcriptId: string,
+  status: TranscriptStatus,
+  overrides?: Partial<TranscriptDocument>,
+) {
+  const updatePayload: Partial<TranscriptDocument> = {
+    status,
+    ...overrides,
+  };
+  if (status === "done" || status === "failed") {
+    updatePayload.completedAt = Timestamp.now();
+  }
+  await updateTranscript(videoId, transcriptId, updatePayload);
 }

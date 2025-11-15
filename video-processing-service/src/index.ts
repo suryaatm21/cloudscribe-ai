@@ -1,21 +1,53 @@
 import express, { Request, Response } from "express";
-import { setupDirectories } from "./storage";
-import { isVideoNew, setVideo } from "./firestore";
+import { setupDirectories, getStorageClient } from "./storage";
+import {
+  getTranscript,
+  isVideoNew,
+  setVideo,
+  updateTranscript,
+  updateTranscriptStatus,
+} from "./firestore";
 import { processVideo } from "./videoProcessor";
 import { buildHealthResponse } from "./health";
 import {
   decodePubSubMessage,
+  decodeJsonPayload,
   logRequest,
   sendSuccessResponse,
   sendBadRequestResponse,
   sendAcknowledgmentResponse,
 } from "./pubsubHandler";
 import { logger } from "./logger";
+import {
+  pollTranscriptionResult,
+  startTranscriptionJob,
+  uploadTranscriptPayload,
+} from "./transcription";
+import { TranscriptionJobPayload } from "./transcriptionQueue";
+import { serviceConfig } from "./config";
 
 const app = express();
 app.use(express.json());
 
 setupDirectories();
+
+/**
+ * Extracts userId from videoId with format validation.
+ * Expected format: {userId}-{timestamp}-{random}
+ * @param videoId - The video identifier
+ * @returns userId or null if format is invalid
+ */
+function extractUserId(videoId: string): string | null {
+  if (!videoId || typeof videoId !== "string") {
+    return null;
+  }
+  const parts = videoId.split("-");
+  if (parts.length < 2) {
+    return null;
+  }
+  const userId = parts[0];
+  return userId && userId.length > 0 ? userId : null;
+}
 
 /**
  * Health endpoint to verify service readiness and dependency availability.
@@ -65,6 +97,18 @@ app.post(
     const outputFileName = `processed-${inputFileName}`;
     const videoId = inputFileName.split(".")[0]; // Extract video ID from filename
 
+    // Extract userId from videoId (format: {userId}-{timestamp}-{random})
+    const userId = extractUserId(videoId);
+    if (!userId) {
+      logger.error("Invalid videoId format", {
+        component: "videoProcessor",
+        videoId,
+        expectedFormat: "userId-timestamp-random",
+      });
+      sendAcknowledgmentResponse(res);
+      return;
+    }
+
     // Only process video if it's new, otherwise skip to avoid duplicates
     // Return 200 (not 400) so Pub/Sub doesn't retry already-processed videos
     if (!(await isVideoNew(videoId))) {
@@ -82,7 +126,7 @@ app.post(
     // Set initial video status as processing
     await setVideo(videoId, {
       id: videoId,
-      uid: videoId.split("-")[0],
+      uid: userId,
       status: "processing",
     });
 
@@ -96,6 +140,131 @@ app.post(
         error: err instanceof Error ? err.message : err,
       });
       sendAcknowledgmentResponse(res);
+    }
+  },
+);
+
+app.post(
+  "/transcribe-audio",
+  async (req: Request, res: Response): Promise<void> => {
+    logRequest(req);
+
+    let payload: TranscriptionJobPayload;
+    try {
+      payload = decodeJsonPayload<TranscriptionJobPayload>(req);
+    } catch (error) {
+      logger.error("Invalid transcription message", {
+        component: "transcription",
+        error: error instanceof Error ? error.message : error,
+      });
+      sendBadRequestResponse(res, "Invalid transcription payload");
+      return;
+    }
+
+    const { videoId, transcriptId, audioGcsUri } = payload;
+    if (!videoId || !transcriptId || !audioGcsUri) {
+      sendBadRequestResponse(res, "Missing transcription job fields");
+      return;
+    }
+
+    try {
+      const transcript = await getTranscript(videoId, transcriptId);
+      if (!transcript) {
+        logger.error("Transcript metadata not found", {
+          component: "transcription",
+          videoId,
+          transcriptId,
+        });
+        await updateTranscriptStatus(videoId, transcriptId, "failed", {
+          error: "Transcript metadata missing",
+        });
+        sendAcknowledgmentResponse(res);
+        return;
+      }
+
+      if (transcript.status === "done") {
+        sendSuccessResponse(res, "Transcript already completed");
+        return;
+      }
+
+      // Idempotency check: avoid duplicate jobs if already running
+      if (transcript.status === "running" && transcript.operationName) {
+        logger.info("Transcription already in progress, resuming polling", {
+          component: "transcription",
+          videoId,
+          transcriptId,
+          operationName: transcript.operationName,
+        });
+        // Resume polling the existing operation
+        const transcriptPayload = await pollTranscriptionResult(
+          transcript.operationName,
+          videoId,
+        );
+        const gcsPath = await uploadTranscriptPayload(videoId, transcriptPayload);
+        await updateTranscriptStatus(videoId, transcriptId, "done", {
+          gcsPath,
+          segmentCount: transcriptPayload.segments.length,
+          durationSeconds: transcriptPayload.durationSeconds,
+        });
+        sendSuccessResponse(res, "Transcription completed (resumed)");
+        return;
+      }
+
+      const operationName =
+        transcript.operationName ??
+        (await startTranscriptionJob(audioGcsUri, videoId));
+
+      if (!transcript.operationName) {
+        await updateTranscript(videoId, transcriptId, { operationName });
+      }
+
+      await updateTranscriptStatus(videoId, transcriptId, "running");
+
+      const transcriptPayload = await pollTranscriptionResult(
+        operationName,
+        videoId,
+      );
+      const gcsPath = await uploadTranscriptPayload(videoId, transcriptPayload);
+
+      await updateTranscriptStatus(videoId, transcriptId, "done", {
+        gcsPath,
+        segmentCount: transcriptPayload.segments.length,
+        durationSeconds: transcriptPayload.durationSeconds,
+      });
+
+      // Clean up audio file after successful transcription
+      try {
+        const audioFileName = `${videoId}.flac`;
+        const audioWorkBucket = getStorageClient().bucket(
+          serviceConfig.audioWorkBucketName,
+        );
+        await audioWorkBucket.file(audioFileName).delete();
+        logger.info("Cleaned up audio work file", {
+          component: "transcription",
+          videoId,
+          audioFileName,
+        });
+      } catch (cleanupErr) {
+        logger.warn("Failed to clean up audio work file", {
+          component: "transcription",
+          videoId,
+          error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
+        });
+      }
+
+      sendSuccessResponse(res, "Transcription completed");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Transcription job failed", {
+        component: "transcription",
+        videoId: payload.videoId,
+        transcriptId: payload.transcriptId,
+        error: message,
+      });
+      await updateTranscriptStatus(payload.videoId, payload.transcriptId, "failed", {
+        error: message,
+      });
+      res.status(500).send("Transcription job failed");
     }
   },
 );

@@ -31,6 +31,15 @@ export interface Video {
   description?: string;
 }
 
+interface TranscriptDoc {
+  status?: "pending" | "running" | "failed" | "done";
+  gcsPath?: string;
+  language?: string;
+  model?: string;
+  segmentCount?: number;
+  durationSeconds?: number;
+}
+
 export const createUser = functions.auth.user().onCreate((user) => {
   const userInfo = {
     uid: user.uid,
@@ -141,3 +150,91 @@ export const getVideos = onCall({maxInstances: 1}, async (request) => {
     .get();
   return querySnapshot.docs.map((doc) => doc.data());
 });
+
+export const getTranscriptUrl = onCall(
+  {maxInstances: 1},
+  async (request) => {
+    if (!request.auth) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "Authentication required",
+      );
+    }
+
+    const {videoId, transcriptId = "primary"} = request.data ?? {};
+    if (!videoId) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "videoId is required",
+      );
+    }
+
+    const videoSnapshot = await firestore
+      .collection(videoCollectionId)
+      .doc(videoId)
+      .get();
+
+    if (!videoSnapshot.exists) {
+      throw new functions.https.HttpsError("not-found", "Video not found");
+    }
+
+    const videoData = videoSnapshot.data() as Video;
+    if (videoData.uid !== request.auth.uid) {
+      throw new functions.https.HttpsError(
+        "permission-denied",
+        "You do not have access to this transcript",
+      );
+    }
+
+    const transcriptSnapshot = await videoSnapshot.ref
+      .collection("transcripts")
+      .doc(transcriptId)
+      .get();
+
+    if (!transcriptSnapshot.exists) {
+      throw new functions.https.HttpsError(
+        "not-found",
+        "Transcript metadata not found",
+      );
+    }
+
+    const transcript = transcriptSnapshot.data() as TranscriptDoc;
+    if (transcript.status !== "done" || !transcript.gcsPath) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "Transcript not ready",
+      );
+    }
+
+    const gcsParts = parseGcsUri(transcript.gcsPath);
+    const [url] = await storage
+      .bucket(gcsParts.bucket)
+      .file(gcsParts.path)
+      .getSignedUrl({
+        version: "v4",
+        action: "read",
+        expires: Date.now() + 15 * 60 * 1000,
+      });
+
+    return {
+      url,
+      transcriptId,
+      segmentCount: transcript.segmentCount ?? 0,
+      durationSeconds: transcript.durationSeconds ?? 0,
+      language: transcript.language,
+      model: transcript.model,
+    };
+  },
+);
+
+function parseGcsUri(uri: string): {bucket: string; path: string} {
+  if (!uri.startsWith("gs://")) {
+    throw new Error("Invalid GCS URI");
+  }
+  const [, bucketAndPath] = uri.split("gs://");
+  const [bucket, ...pathParts] = bucketAndPath.split("/");
+  return {
+    bucket,
+    path: pathParts.join("/"),
+  };
+}
