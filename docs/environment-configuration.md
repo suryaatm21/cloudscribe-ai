@@ -12,12 +12,20 @@ This document captures all required environment variables, service accounts, and
 | `SERVICE_NAME` | ✅ | `video-processing-service` | Cloud Run service name |
 | `RAW_VIDEO_BUCKET_NAME` | ✅ | `atmuri-yt-raw-videos` | Bucket receiving uploads from the web client |
 | `PROCESSED_VIDEO_BUCKET_NAME` | ✅ | `atmuri-yt-processed-videos` | Bucket serving processed media |
+| `AUDIO_WORK_BUCKET_NAME` | ✅ | `atmuri-yt-audio-work` | Temporary bucket for extracted audio uploaded to Speech-to-Text |
+| `TRANSCRIPTS_BUCKET_NAME` | ✅ | `atmuri-yt-transcripts` | Bucket where final transcript JSON artifacts are stored |
+| `TRANSCRIPTION_TOPIC_NAME` | ✅ | `transcription-jobs` | Pub/Sub topic for asynchronous transcription work |
+| `SPEECH_TO_TEXT_MODEL` | ✅ | `long` | Speech-to-Text v2 model (`long` or `short`) |
+| `SPEECH_TO_TEXT_LANGUAGE` | ✅ | `en-US` | Default language code for recognition |
+| `ENABLE_TRANSCRIPTION` | ✅ | `true` | Feature flag to toggle downstream transcription pipeline |
 | `PROCESSING_MAX_ATTEMPTS` | ✅ | `3` | Number of retries before marking a video as failed |
 | `SERVICE_VERSION` | ➖ | `dev` | Overrides version reported by `/health` |
 | `NODE_ENV` | ➖ | `development` | Used for logging context |
 | `GOOGLE_APPLICATION_CREDENTIALS` | ➖ | – | Path to service account JSON when running locally |
 | `SMOKE_ID_TOKEN` | ➖ | – | Firebase ID token for smoke test authentication |
 | `SMOKE_FUNCTIONS_URL` | ➖ | – | Base URL to Firebase Functions endpoint (for smoke test) |
+| `SMOKE_TRANSCRIPTS_BUCKET` | ➖ | `atmuri-yt-transcripts` | Bucket name the smoke test uses to verify transcript artifacts |
+| `SMOKE_TRANSCRIPT_ID` | ➖ | `primary` | Transcript document id that the smoke test polls |
 
 **Required APIs**
 
@@ -28,6 +36,7 @@ This document captures all required environment variables, service accounts, and
 - Cloud Storage JSON API
 - Firestore API
 - Pub/Sub API
+- Speech-to-Text API
 
 **Service Accounts**
 
@@ -36,7 +45,16 @@ This document captures all required environment variables, service accounts, and
   - `roles/artifactregistry.writer`
   - `roles/storage.objectAdmin` on both buckets
   - `roles/pubsub.subscriber` for processing subscription
+  - `roles/pubsub.publisher` on `transcription-jobs`
+  - `roles/pubsub.subscriber` on `transcription-jobs-sub`
+  - `roles/speech.client`
+- Firebase Functions default service account
+  - `roles/storage.objectCreator` on raw bucket (upload URLs)
+  - `roles/storage.objectViewer` on transcripts bucket (signed transcript URLs)
 
+**Infrastructure bootstrap**
+
+- Run `scripts/setup-transcription-infra.sh` to enable the Speech-to-Text API, create the `transcripts` bucket, create the `transcription-jobs` topic/subscription (with dead-letter topic), and bind Speech/Pub/Sub/Storage roles to the Cloud Run service account. The script is idempotent and validates prerequisites.
 ## Firebase Functions API (`api-service/functions`)
 
 | Variable | Required | Default | Description |
@@ -82,4 +100,5 @@ This document captures all required environment variables, service accounts, and
 2. Run `npm test` inside `video-processing-service` to ensure env-dependent logic passes.
 3. Execute `./video-processing-service/deploy.sh` to verify deploy script uses the documented variables.
 4. Run `firebase functions:config:get` to confirm Firebase functions have matching values.
+5. Capture coverage and latency metrics locally in the gitignored `metrics/` directory (e.g., `metrics/test-coverage.txt`) for operational reporting.
 

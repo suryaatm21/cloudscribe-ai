@@ -8,9 +8,11 @@ const storage = new Storage();
 
 const rawVideoBucketName = serviceConfig.rawVideoBucketName;
 const processedVideoBucketName = serviceConfig.processedVideoBucketName;
+const audioWorkBucketName = serviceConfig.audioWorkBucketName;
 
 const localRawVideoPath = './raw-videos';
 const localProcessedVideoPath = './processed-videos';
+const localAudioWorkPath = './audio-work';
 
 export function getStorageClient(): Storage {
   return storage;
@@ -22,6 +24,7 @@ export function getStorageClient(): Storage {
 export function setupDirectories() {
   ensureDirectoryExistence(localRawVideoPath);
   ensureDirectoryExistence(localProcessedVideoPath);
+  ensureDirectoryExistence(localAudioWorkPath);
 }
 
 /**
@@ -33,7 +36,6 @@ export function setupDirectories() {
 export function convertVideo(rawVideoName: string, processedVideoName: string) {
   return new Promise<void>((resolve, reject) => {
     ffmpeg(`${localRawVideoPath}/${rawVideoName}`)
-      .outputOptions('-vf', 'scale=-1:360')
       .on('end', () => {
         logger.info('Video conversion finished', {
           component: 'storage',
@@ -52,6 +54,43 @@ export function convertVideo(rawVideoName: string, processedVideoName: string) {
         reject(err);
       })
       .save(`${localProcessedVideoPath}/${processedVideoName}`);
+  });
+}
+
+/**
+ * Extracts audio from a processed video file and stores it locally as FLAC.
+ * @param {string} processedVideoName - The name of the processed video file.
+ * @param {string} audioFileName - The target audio file name (should end with .flac).
+ * @returns {Promise<void>} A promise resolved when extraction completes.
+ */
+export function extractAudio(
+  processedVideoName: string,
+  audioFileName: string,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    ffmpeg(`${localProcessedVideoPath}/${processedVideoName}`)
+      .noVideo()
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .audioCodec('flac')
+      .on('end', () => {
+        logger.info('Audio extraction finished', {
+          component: 'storage',
+          inputFile: processedVideoName,
+          outputFile: audioFileName,
+        });
+        resolve();
+      })
+      .on('error', (err) => {
+        logger.error('Audio extraction error', {
+          component: 'storage',
+          inputFile: processedVideoName,
+          outputFile: audioFileName,
+          error: err instanceof Error ? err.message : err,
+        });
+        reject(err);
+      })
+      .save(`${localAudioWorkPath}/${audioFileName}`);
   });
 }
 
@@ -92,6 +131,27 @@ export async function uploadProcessedVideo(fileName: string) {
 }
 
 /**
+ * Uploads an extracted audio file for transcription to the configured bucket.
+ * @param {string} fileName - The local audio file name.
+ * @returns {Promise<string>} GCS URI for the uploaded audio object.
+ */
+export async function uploadAudioForTranscription(fileName: string) {
+  const bucket = storage.bucket(audioWorkBucketName);
+  const localPath = `${localAudioWorkPath}/${fileName}`;
+  await bucket.upload(localPath, {
+    destination: fileName,
+    metadata: { contentType: 'audio/flac' },
+  });
+  const gcsUri = `gs://${audioWorkBucketName}/${fileName}`;
+  logger.info('Uploaded audio for transcription', {
+    component: 'storage',
+    fileName,
+    bucket: audioWorkBucketName,
+  });
+  return gcsUri;
+}
+
+/**
  * Deletes a raw video file from the local file system.
  * @param {string} fileName - The name of the raw video file to delete.
  * @returns {Promise<void>} A promise that resolves when the file is deleted.
@@ -107,6 +167,15 @@ export function deleteRawVideo(fileName: string) {
  */
 export function deleteProcessedVideo(fileName: string) {
   return deleteFile(`${localProcessedVideoPath}/${fileName}`);
+}
+
+/**
+ * Deletes a local audio work file.
+ * @param {string} fileName - The name of the audio file to delete.
+ * @returns {Promise<void>} Resolves when deletion completes.
+ */
+export function deleteAudioWorkFile(fileName: string) {
+  return deleteFile(`${localAudioWorkPath}/${fileName}`);
 }
 
 function deleteFile(filePath: string) {

@@ -7,6 +7,7 @@ REQUIRED_VARS=(
   "SMOKE_ID_TOKEN"
   "SMOKE_TEST_FILE"
   "SMOKE_PROCESSED_BUCKET"
+  "SMOKE_TRANSCRIPTS_BUCKET"
 )
 
 for var in "${REQUIRED_VARS[@]}"; do
@@ -20,6 +21,7 @@ SMOKE_POLL_INTERVAL="${SMOKE_POLL_INTERVAL:-30}"
 SMOKE_MAX_POLLS="${SMOKE_MAX_POLLS:-10}"
 SMOKE_CONTENT_TYPE="${SMOKE_CONTENT_TYPE:-video/mp4}"
 RAW_BUCKET="${SMOKE_RAW_BUCKET:-atmuri-yt-raw-videos}"
+TRANSCRIPT_ID="${SMOKE_TRANSCRIPT_ID:-primary}"
 
 command -v curl >/dev/null 2>&1 || { echo "curl is required"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required"; exit 1; }
@@ -76,7 +78,38 @@ if ! gsutil ls "$PROCESSED_OBJECT" >/dev/null 2>&1; then
   exit 1
 fi
 
+section "Polling Firestore for transcript status"
+TRANSCRIPT_DOC="${FIRESTORE_DOC}/transcripts/${TRANSCRIPT_ID}"
+TRANSCRIPT_STATUS="pending"
+TRANSCRIPT_PATH=""
+for (( attempt=1; attempt<=SMOKE_MAX_POLLS; attempt++ )); do
+  RESPONSE=$(curl -s -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+    "https://firestore.googleapis.com/v1/${TRANSCRIPT_DOC}")
+  TRANSCRIPT_STATUS=$(echo "$RESPONSE" | jq -r '.fields.status.stringValue // "pending"')
+  TRANSCRIPT_PATH=$(echo "$RESPONSE" | jq -r '.fields.gcsPath.stringValue // ""')
+  echo "Transcript attempt ${attempt}/${SMOKE_MAX_POLLS}: status=${TRANSCRIPT_STATUS}"
+  if [[ "$TRANSCRIPT_STATUS" == "done" && -n "$TRANSCRIPT_PATH" ]]; then
+    break
+  fi
+  sleep "$SMOKE_POLL_INTERVAL"
+done
+
+if [[ "$TRANSCRIPT_STATUS" != "done" || -z "$TRANSCRIPT_PATH" ]]; then
+  echo "Transcript did not complete in time"
+  exit 1
+fi
+
+section "Validating transcript artifact exists"
+TRANSCRIPT_OBJECT="${TRANSCRIPT_PATH:-gs://${SMOKE_TRANSCRIPTS_BUCKET}/${VIDEO_ID}/transcript.json}"
+if ! gsutil ls "$TRANSCRIPT_OBJECT" >/dev/null 2>&1; then
+  echo "Transcript file not found at $TRANSCRIPT_OBJECT"
+  exit 1
+fi
+
+echo "Transcript object: ${TRANSCRIPT_OBJECT}"
+
 echo "\n✅ Smoke test succeeded"
 echo "Video ID: ${VIDEO_ID}"
 echo "Processed object: ${PROCESSED_OBJECT}"
+echo "Transcript object: ${TRANSCRIPT_OBJECT}"
 echo "Raw bucket: gs://${RAW_BUCKET}/${FILE_NAME}"

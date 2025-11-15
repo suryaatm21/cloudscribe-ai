@@ -39,12 +39,14 @@ export default function Home() {
         <p>No videos available yet. Upload your first video!</p>
       ) : (
         <div className={styles.videoGrid}>
-          {videos.map((video) => (
-            <Link
-              href={`/watch?v=${video.filename}`}
-              key={video.id || video.filename}
-              className={styles.videoCard}
-            >
+          {videos.map((video) => {
+            const targetId = video.id || video.filename?.split(".")[0] || "";
+            return (
+              <Link
+                href={`/watch?id=${targetId}`}
+                key={video.id || video.filename}
+                className={styles.videoCard}
+              >
               <Image
                 src={"/thumbnail.png"}
                 alt={video.title || "video"}
@@ -56,8 +58,9 @@ export default function Home() {
                 <h3>{video.title || video.filename}</h3>
                 <p>{video.status}</p>
               </div>
-            </Link>
-          ))}
+              </Link>
+            );
+          })}
         </div>
       )}
     </main>

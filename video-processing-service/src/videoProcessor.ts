@@ -4,10 +4,20 @@ import {
   deleteRawVideo,
   uploadProcessedVideo,
   deleteProcessedVideo,
-} from './storage';
-import { setVideo } from './firestore';
-import { serviceConfig } from './config';
-import { logger } from './logger';
+  extractAudio,
+  uploadAudioForTranscription,
+  deleteAudioWorkFile,
+} from "./storage";
+import {
+  createTranscript,
+  setVideo,
+  updateTranscriptStatus,
+} from "./firestore";
+import { serviceConfig } from "./config";
+import { logger } from "./logger";
+import { publishTranscriptionJob } from "./transcriptionQueue";
+
+const DEFAULT_TRANSCRIPT_ID = "primary";
 
 /**
  * Processes a video by downloading, converting, uploading, and updating its status.
@@ -43,26 +53,30 @@ export async function processVideo(
       await uploadProcessedVideo(outputFileName);
 
       await setVideo(videoId, {
-        status: 'processed',
+        status: "processed",
         filename: outputFileName,
       });
+
+      if (serviceConfig.enableTranscription) {
+        await triggerTranscriptionPipeline(videoId, outputFileName);
+      }
 
       await Promise.all([
         deleteRawVideo(inputFileName),
         deleteProcessedVideo(outputFileName),
       ]);
 
-      logger.info('Successfully processed video', {
+      logger.info("Successfully processed video", {
         jobId: videoId,
-        component: 'videoProcessor',
+        component: "videoProcessor",
         inputFileName,
       });
       return;
     } catch (err) {
       lastError = err;
-      logger.error('Error during video processing', {
+      logger.error("Error during video processing", {
         jobId: videoId,
-        component: 'videoProcessor',
+        component: "videoProcessor",
         attempt,
         maxAttempts,
         error: err instanceof Error ? err.message : err,
@@ -70,23 +84,23 @@ export async function processVideo(
       await cleanupFiles(inputFileName, outputFileName);
 
       if (attempt < maxAttempts) {
-        logger.warn('Retrying video processing after failure', {
+        logger.warn("Retrying video processing after failure", {
           jobId: videoId,
-          component: 'videoProcessor',
+          component: "videoProcessor",
           nextAttempt: attempt + 1,
         });
       }
     }
   }
 
-  await setVideo(videoId, { status: 'failed' });
+  await setVideo(videoId, { status: "failed" });
   const errorToThrow =
     lastError instanceof Error
       ? lastError
-      : new Error('Video processing failed after retries');
-  logger.error('Exhausted video processing attempts', {
+      : new Error("Video processing failed after retries");
+  logger.error("Exhausted video processing attempts", {
     jobId: videoId,
-    component: 'videoProcessor',
+    component: "videoProcessor",
     attempts: maxAttempts,
     error: errorToThrow.message,
   });
@@ -109,8 +123,8 @@ async function cleanupFiles(
       deleteProcessedVideo(outputFileName),
     ]);
   } catch (cleanupErr) {
-    logger.error('Error during cleanup', {
-      component: 'videoProcessor',
+    logger.error("Error during cleanup", {
+      component: "videoProcessor",
       jobId: videoIdFromFileNames(inputFileName),
       error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
     });
@@ -118,5 +132,55 @@ async function cleanupFiles(
 }
 
 function videoIdFromFileNames(inputFileName: string): string | undefined {
-  return inputFileName.split('.')[0];
+  return inputFileName.split(".")[0];
 }
+
+async function triggerTranscriptionPipeline(
+  videoId: string,
+  processedFileName: string,
+) {
+  const transcriptId = DEFAULT_TRANSCRIPT_ID;
+  const uid = videoId.split("-")[0];
+  const audioFileName = `${videoId}.flac`;
+
+  try {
+    await extractAudio(processedFileName, audioFileName);
+    const audioGcsUri = await uploadAudioForTranscription(audioFileName);
+
+    await createTranscript(videoId, transcriptId, {
+      status: "pending",
+      language: serviceConfig.speechToTextLanguage,
+      model: serviceConfig.speechToTextModel,
+      audioGcsUri,
+      userId: uid,
+    });
+
+    await publishTranscriptionJob({
+      videoId,
+      transcriptId,
+      audioGcsUri,
+      userId: uid,
+    });
+
+    await updateTranscriptStatus(videoId, transcriptId, "running");
+    logger.info("Queued transcription job", {
+      component: "videoProcessor",
+      videoId,
+      transcriptId,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("Failed to queue transcription job", {
+      component: "videoProcessor",
+      videoId,
+      transcriptId,
+      error: message,
+    });
+    await updateTranscriptStatus(videoId, transcriptId, "failed", {
+      error: message,
+    });
+  } finally {
+    await deleteAudioWorkFile(audioFileName);
+  }
+}
+

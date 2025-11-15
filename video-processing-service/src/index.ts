@@ -1,16 +1,29 @@
 import express, { Request, Response } from "express";
 import { setupDirectories } from "./storage";
-import { isVideoNew, setVideo } from "./firestore";
+import {
+  getTranscript,
+  isVideoNew,
+  setVideo,
+  updateTranscript,
+  updateTranscriptStatus,
+} from "./firestore";
 import { processVideo } from "./videoProcessor";
 import { buildHealthResponse } from "./health";
 import {
   decodePubSubMessage,
+  decodeJsonPayload,
   logRequest,
   sendSuccessResponse,
   sendBadRequestResponse,
   sendAcknowledgmentResponse,
 } from "./pubsubHandler";
 import { logger } from "./logger";
+import {
+  pollTranscriptionResult,
+  startTranscriptionJob,
+  uploadTranscriptPayload,
+} from "./transcription";
+import { TranscriptionJobPayload } from "./transcriptionQueue";
 
 const app = express();
 app.use(express.json());
@@ -96,6 +109,83 @@ app.post(
         error: err instanceof Error ? err.message : err,
       });
       sendAcknowledgmentResponse(res);
+    }
+  },
+);
+
+app.post(
+  "/transcribe-audio",
+  async (req: Request, res: Response): Promise<void> => {
+    logRequest(req);
+
+    let payload: TranscriptionJobPayload;
+    try {
+      payload = decodeJsonPayload<TranscriptionJobPayload>(req);
+    } catch (error) {
+      logger.error("Invalid transcription message", {
+        component: "transcription",
+        error: error instanceof Error ? error.message : error,
+      });
+      sendBadRequestResponse(res, "Invalid transcription payload");
+      return;
+    }
+
+    const { videoId, transcriptId, audioGcsUri } = payload;
+    if (!videoId || !transcriptId || !audioGcsUri) {
+      sendBadRequestResponse(res, "Missing transcription job fields");
+      return;
+    }
+
+    try {
+      const transcript = await getTranscript(videoId, transcriptId);
+      if (!transcript) {
+        await updateTranscriptStatus(videoId, transcriptId, "failed", {
+          error: "Transcript metadata missing",
+        });
+        sendAcknowledgmentResponse(res);
+        return;
+      }
+
+      if (transcript.status === "done") {
+        sendSuccessResponse(res, "Transcript already completed");
+        return;
+      }
+
+      const operationName =
+        transcript.operationName ??
+        (await startTranscriptionJob(audioGcsUri, videoId));
+
+      if (!transcript.operationName) {
+        await updateTranscript(videoId, transcriptId, { operationName });
+      }
+
+      await updateTranscriptStatus(videoId, transcriptId, "running");
+
+      const transcriptPayload = await pollTranscriptionResult(
+        operationName,
+        videoId,
+      );
+      const gcsPath = await uploadTranscriptPayload(videoId, transcriptPayload);
+
+      await updateTranscriptStatus(videoId, transcriptId, "done", {
+        gcsPath,
+        segmentCount: transcriptPayload.segments.length,
+        durationSeconds: transcriptPayload.durationSeconds,
+      });
+
+      sendSuccessResponse(res, "Transcription completed");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Transcription job failed", {
+        component: "transcription",
+        videoId: payload.videoId,
+        transcriptId: payload.transcriptId,
+        error: message,
+      });
+      await updateTranscriptStatus(payload.videoId, payload.transcriptId, "failed", {
+        error: message,
+      });
+      res.status(500).send("Transcription job failed");
     }
   },
 );
