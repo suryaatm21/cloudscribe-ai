@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { setupDirectories } from "./storage";
+import { setupDirectories, getStorageClient } from "./storage";
 import {
   getTranscript,
   isVideoNew,
@@ -24,6 +24,7 @@ import {
   uploadTranscriptPayload,
 } from "./transcription";
 import { TranscriptionJobPayload } from "./transcriptionQueue";
+import { serviceConfig } from "./config";
 
 const app = express();
 app.use(express.json());
@@ -151,6 +152,29 @@ app.post(
         return;
       }
 
+      // Idempotency check: avoid duplicate jobs if already running
+      if (transcript.status === "running" && transcript.operationName) {
+        logger.info("Transcription already in progress, resuming polling", {
+          component: "transcription",
+          videoId,
+          transcriptId,
+          operationName: transcript.operationName,
+        });
+        // Resume polling the existing operation
+        const transcriptPayload = await pollTranscriptionResult(
+          transcript.operationName,
+          videoId,
+        );
+        const gcsPath = await uploadTranscriptPayload(videoId, transcriptPayload);
+        await updateTranscriptStatus(videoId, transcriptId, "done", {
+          gcsPath,
+          segmentCount: transcriptPayload.segments.length,
+          durationSeconds: transcriptPayload.durationSeconds,
+        });
+        sendSuccessResponse(res, "Transcription completed (resumed)");
+        return;
+      }
+
       const operationName =
         transcript.operationName ??
         (await startTranscriptionJob(audioGcsUri, videoId));
@@ -172,6 +196,26 @@ app.post(
         segmentCount: transcriptPayload.segments.length,
         durationSeconds: transcriptPayload.durationSeconds,
       });
+
+      // Clean up audio file after successful transcription
+      try {
+        const audioFileName = `${videoId}.flac`;
+        const audioWorkBucket = getStorageClient().bucket(
+          serviceConfig.audioWorkBucketName,
+        );
+        await audioWorkBucket.file(audioFileName).delete();
+        logger.info("Cleaned up audio work file", {
+          component: "transcription",
+          videoId,
+          audioFileName,
+        });
+      } catch (cleanupErr) {
+        logger.warn("Failed to clean up audio work file", {
+          component: "transcription",
+          videoId,
+          error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
+        });
+      }
 
       sendSuccessResponse(res, "Transcription completed");
     } catch (error) {

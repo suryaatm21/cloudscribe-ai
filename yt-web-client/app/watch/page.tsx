@@ -194,7 +194,7 @@ function WatchContent() {
           transcriptData.segments.length > 0 && (
             <div className="mt-4 space-y-3">
               {transcriptData.segments.map((segment, index) => (
-                <div key={`${segment.startTime}-${index}`}>
+                <div key={index}>
                   <span className="text-xs text-gray-500 mr-2">
                     {formatTimestamp(segment.startTime)} -{" "}
                     {formatTimestamp(segment.endTime)}

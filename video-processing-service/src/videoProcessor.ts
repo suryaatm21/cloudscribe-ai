@@ -168,6 +168,9 @@ async function triggerTranscriptionPipeline(
       videoId,
       transcriptId,
     });
+
+    // Note: Audio file cleanup deferred to /transcribe-audio endpoint
+    // to avoid race condition where file is deleted before Speech-to-Text reads it
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error("Failed to queue transcription job", {
@@ -179,7 +182,7 @@ async function triggerTranscriptionPipeline(
     await updateTranscriptStatus(videoId, transcriptId, "failed", {
       error: message,
     });
-  } finally {
+    // Clean up audio file only if job publication failed
     await deleteAudioWorkFile(audioFileName);
   }
 }
