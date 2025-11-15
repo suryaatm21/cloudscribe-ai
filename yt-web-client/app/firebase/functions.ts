@@ -1,4 +1,4 @@
-import { getFunctions, httpsCallable } from "firebase/functions";
+import { httpsCallable } from "firebase/functions";
 import { functions } from "./firebase";
 
 const generateUploadUrl = httpsCallable(functions, "generateUploadUrl");

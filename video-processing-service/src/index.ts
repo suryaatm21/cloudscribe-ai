@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import { setupDirectories } from "./storage";
 import { isVideoNew, setVideo } from "./firestore";
 import { processVideo } from "./videoProcessor";
+import { buildHealthResponse } from "./health";
 import {
   decodePubSubMessage,
   logRequest,
@@ -9,11 +10,33 @@ import {
   sendBadRequestResponse,
   sendAcknowledgmentResponse,
 } from "./pubsubHandler";
+import { logger } from "./logger";
 
 const app = express();
 app.use(express.json());
 
 setupDirectories();
+
+/**
+ * Health endpoint to verify service readiness and dependency availability.
+ */
+app.get("/health", async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const healthReport = await buildHealthResponse();
+    const statusCode = healthReport.status === "ok" ? 200 : 503;
+    res.status(statusCode).json(healthReport);
+  } catch (error) {
+    logger.error("Health check failed", {
+      component: "http",
+      error: error instanceof Error ? error.message : error,
+    });
+    res.status(503).json({
+      status: "unhealthy",
+      timestamp: new Date().toISOString(),
+      reason: "Unexpected error while computing health report",
+    });
+  }
+});
 
 /**
  * Endpoint to handle video processing requests from Pub/Sub.
@@ -29,7 +52,10 @@ app.post(
     try {
       data = decodePubSubMessage(req);
     } catch (error) {
-      console.error("Error decoding message:", error);
+      logger.error("Error decoding Pub/Sub message", {
+        component: "pubsubHandler",
+        error: error instanceof Error ? error.message : error,
+      });
       // Always return 200 to prevent Pub/Sub from retrying malformed messages
       sendAcknowledgmentResponse(res);
       return;
@@ -46,6 +72,10 @@ app.post(
         res,
         "Video already processed or processing - skipping",
       );
+      logger.info("Skipping already processed video", {
+        jobId: videoId,
+        component: "videoProcessor",
+      });
       return;
     }
 
@@ -60,7 +90,11 @@ app.post(
       await processVideo(inputFileName, outputFileName, videoId);
       sendSuccessResponse(res, "Processing completed successfully");
     } catch (err) {
-      console.error("Error during video processing:", err);
+      logger.error("Error during video processing", {
+        jobId: videoId,
+        component: "videoProcessor",
+        error: err instanceof Error ? err.message : err,
+      });
       sendAcknowledgmentResponse(res);
     }
   },
@@ -68,6 +102,11 @@ app.post(
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`Video processing service running at http://localhost:${port}`);
-  console.log("Ready to process videos from Pub/Sub");
+  logger.info("Video processing service started", {
+    component: "bootstrap",
+    port,
+  });
+  logger.info("Ready to process videos from Pub/Sub", {
+    component: "bootstrap",
+  });
 });

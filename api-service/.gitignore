@@ -67,3 +67,6 @@ node_modules/
 
 # dataconnect generated files
 .dataconnect
+serviceAccountKey.json
+users.json
+/api-service/.env.local.smoke-test
