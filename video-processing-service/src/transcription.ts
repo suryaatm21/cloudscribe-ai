@@ -40,13 +40,13 @@ export async function startTranscriptionJob(
   audioGcsUri: string,
   referenceId: string,
 ): Promise<string> {
-  const request: protos.google.cloud.speech.v1.ILongRunningRecognizeRequest = {
+  if (!audioGcsUri || !audioGcsUri.startsWith(\"gs://\")) {\n    throw new Error(`Invalid GCS URI: ${audioGcsUri}`);\n  }\n\n  const request: protos.google.cloud.speech.v1.ILongRunningRecognizeRequest = {
     audio: { uri: audioGcsUri },
     config: {
-      encoding: "FLAC",
+      encoding: \"FLAC\",
       languageCode: serviceConfig.speechToTextLanguage,
       model:
-        serviceConfig.speechToTextModel === "short" ? "latest_short" : "latest_long",
+        serviceConfig.speechToTextModel === \"short\" ? \"latest_short\" : \"latest_long\",
       enableAutomaticPunctuation: true,
       enableWordTimeOffsets: true,
       profanityFilter: false,
@@ -55,10 +55,10 @@ export async function startTranscriptionJob(
 
   const [operation] = await speechClient.longRunningRecognize(request);
   if (!operation.name) {
-    throw new Error("Speech-to-Text did not return an operation name");
+    throw new Error(\"Speech-to-Text did not return an operation name\");
   }
-  logger.info("Started transcription job", {
-    component: "transcription",
+  logger.info(\"Started transcription job\", {
+    component: \"transcription\",
     operationName: operation.name,
     referenceId,
     audioGcsUri,
@@ -70,6 +70,10 @@ export async function pollTranscriptionResult(
   operationName: string,
   videoId: string,
 ): Promise<ITranscriptPayload> {
+  if (!operationName) {
+    throw new Error(\"Operation name is required for polling\");
+  }
+
   let attempts = 0;
   while (attempts < MAX_POLL_ATTEMPTS) {
     attempts += 1;
@@ -155,14 +159,21 @@ export async function uploadTranscriptPayload(
   videoId: string,
   transcript: ITranscriptPayload,
 ): Promise<string> {
+  if (!videoId) {
+    throw new Error(\"videoId is required for transcript upload\");
+  }
+  if (!transcript || !transcript.segments) {
+    throw new Error(\"Invalid transcript payload\");
+  }
+
   const bucket = storage.bucket(serviceConfig.transcriptsBucketName);
   const objectPath = `${videoId}/transcript.json`;
   const payload = { ...transcript, videoId };
   await bucket.file(objectPath).save(JSON.stringify(payload, null, 2), {
-    contentType: "application/json",
+    contentType: \"application/json\",
   });
-  logger.info("Uploaded transcript JSON", {
-    component: "transcription",
+  logger.info(\"Uploaded transcript JSON\", {
+    component: \"transcription\",
     videoId,
     objectPath,
     bucket: serviceConfig.transcriptsBucketName,

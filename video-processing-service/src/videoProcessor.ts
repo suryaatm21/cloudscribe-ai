@@ -58,7 +58,16 @@ export async function processVideo(
       });
 
       if (serviceConfig.enableTranscription) {
-        await triggerTranscriptionPipeline(videoId, outputFileName);
+        // Extract userId from videoId (format: {userId}-{timestamp}-{random})
+        const userId = videoId.split("-")[0];
+        if (!userId) {
+          logger.error("Cannot extract userId from videoId", {
+            component: "videoProcessor",
+            videoId,
+          });
+        } else {
+          await triggerTranscriptionPipeline(videoId, outputFileName, userId);
+        }
       }
 
       await Promise.all([
@@ -135,12 +144,18 @@ function videoIdFromFileNames(inputFileName: string): string | undefined {
   return inputFileName.split(".")[0];
 }
 
+/**
+ * Triggers the asynchronous transcription pipeline for a processed video.
+ * @param videoId - The unique video identifier
+ * @param processedFileName - The processed video filename
+ * @param userId - The user ID who owns the video
+ */
 async function triggerTranscriptionPipeline(
   videoId: string,
   processedFileName: string,
+  userId: string,
 ) {
   const transcriptId = DEFAULT_TRANSCRIPT_ID;
-  const uid = videoId.split("-")[0];
   const audioFileName = `${videoId}.flac`;
 
   try {
@@ -152,14 +167,14 @@ async function triggerTranscriptionPipeline(
       language: serviceConfig.speechToTextLanguage,
       model: serviceConfig.speechToTextModel,
       audioGcsUri,
-      userId: uid,
+      userId,
     });
 
     await publishTranscriptionJob({
       videoId,
       transcriptId,
       audioGcsUri,
-      userId: uid,
+      userId,
     });
 
     await updateTranscriptStatus(videoId, transcriptId, "running");

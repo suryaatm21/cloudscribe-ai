@@ -32,6 +32,24 @@ app.use(express.json());
 setupDirectories();
 
 /**
+ * Extracts userId from videoId with format validation.
+ * Expected format: {userId}-{timestamp}-{random}
+ * @param videoId - The video identifier
+ * @returns userId or null if format is invalid
+ */
+function extractUserId(videoId: string): string | null {
+  if (!videoId || typeof videoId !== "string") {
+    return null;
+  }
+  const parts = videoId.split("-");
+  if (parts.length < 2) {
+    return null;
+  }
+  const userId = parts[0];
+  return userId && userId.length > 0 ? userId : null;
+}
+
+/**
  * Health endpoint to verify service readiness and dependency availability.
  */
 app.get("/health", async (_req: Request, res: Response): Promise<void> => {
@@ -79,6 +97,18 @@ app.post(
     const outputFileName = `processed-${inputFileName}`;
     const videoId = inputFileName.split(".")[0]; // Extract video ID from filename
 
+    // Extract userId from videoId (format: {userId}-{timestamp}-{random})
+    const userId = extractUserId(videoId);
+    if (!userId) {
+      logger.error("Invalid videoId format", {
+        component: "videoProcessor",
+        videoId,
+        expectedFormat: "userId-timestamp-random",
+      });
+      sendAcknowledgmentResponse(res);
+      return;
+    }
+
     // Only process video if it's new, otherwise skip to avoid duplicates
     // Return 200 (not 400) so Pub/Sub doesn't retry already-processed videos
     if (!(await isVideoNew(videoId))) {
@@ -96,7 +126,7 @@ app.post(
     // Set initial video status as processing
     await setVideo(videoId, {
       id: videoId,
-      uid: videoId.split("-")[0],
+      uid: userId,
       status: "processing",
     });
 
@@ -140,6 +170,11 @@ app.post(
     try {
       const transcript = await getTranscript(videoId, transcriptId);
       if (!transcript) {
+        logger.error("Transcript metadata not found", {
+          component: "transcription",
+          videoId,
+          transcriptId,
+        });
         await updateTranscriptStatus(videoId, transcriptId, "failed", {
           error: "Transcript metadata missing",
         });
