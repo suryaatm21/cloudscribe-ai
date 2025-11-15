@@ -4,20 +4,10 @@ import {
   deleteRawVideo,
   uploadProcessedVideo,
   deleteProcessedVideo,
-  extractAudio,
-  uploadAudioForTranscription,
-  deleteAudioWorkFile,
 } from "./storage";
-import {
-  createTranscript,
-  setVideo,
-  updateTranscriptStatus,
-} from "./firestore";
+import { setVideo } from "./firestore";
 import { serviceConfig } from "./config";
 import { logger } from "./logger";
-import { publishTranscriptionJob } from "./transcriptionQueue";
-
-const DEFAULT_TRANSCRIPT_ID = "primary";
 
 /**
  * Processes a video by downloading, converting, uploading, and updating its status.
@@ -39,9 +29,9 @@ export async function processVideo(
   while (attempt < maxAttempts) {
     attempt += 1;
     try {
-      logger.info('Starting video processing', {
+      logger.info("Starting video processing", {
         jobId: videoId,
-        component: 'videoProcessor',
+        component: "videoProcessor",
         attempt,
         maxAttempts,
         inputFileName,
@@ -56,10 +46,6 @@ export async function processVideo(
         status: "processed",
         filename: outputFileName,
       });
-
-      if (serviceConfig.enableTranscription) {
-        await triggerTranscriptionPipeline(videoId, outputFileName);
-      }
 
       await Promise.all([
         deleteRawVideo(inputFileName),
@@ -125,62 +111,20 @@ async function cleanupFiles(
   } catch (cleanupErr) {
     logger.error("Error during cleanup", {
       component: "videoProcessor",
-      jobId: videoIdFromFileNames(inputFileName),
+      jobId: videoIdFromFileNames(inputFileName) ?? "unknown",
       error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
     });
   }
 }
 
 function videoIdFromFileNames(inputFileName: string): string | undefined {
-  return inputFileName.split(".")[0];
-}
-
-async function triggerTranscriptionPipeline(
-  videoId: string,
-  processedFileName: string,
-) {
-  const transcriptId = DEFAULT_TRANSCRIPT_ID;
-  const uid = videoId.split("-")[0];
-  const audioFileName = `${videoId}.flac`;
-
-  try {
-    await extractAudio(processedFileName, audioFileName);
-    const audioGcsUri = await uploadAudioForTranscription(audioFileName);
-
-    await createTranscript(videoId, transcriptId, {
-      status: "pending",
-      language: serviceConfig.speechToTextLanguage,
-      model: serviceConfig.speechToTextModel,
-      audioGcsUri,
-      userId: uid,
-    });
-
-    await publishTranscriptionJob({
-      videoId,
-      transcriptId,
-      audioGcsUri,
-      userId: uid,
-    });
-
-    await updateTranscriptStatus(videoId, transcriptId, "running");
-    logger.info("Queued transcription job", {
-      component: "videoProcessor",
-      videoId,
-      transcriptId,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error("Failed to queue transcription job", {
-      component: "videoProcessor",
-      videoId,
-      transcriptId,
-      error: message,
-    });
-    await updateTranscriptStatus(videoId, transcriptId, "failed", {
-      error: message,
-    });
-  } finally {
-    await deleteAudioWorkFile(audioFileName);
+  if (!inputFileName) {
+    return undefined;
   }
+  const segments = inputFileName.split(".");
+  if (segments.length <= 1) {
+    return inputFileName;
+  }
+  const candidate = segments.slice(0, -1).join(".");
+  return candidate.length > 0 ? candidate : inputFileName;
 }
-

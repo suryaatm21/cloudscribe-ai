@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { serviceConfig } from "./config";
 import { logger } from "./logger";
 
 /**
@@ -25,29 +26,27 @@ function getJobId(req: Request): string | undefined {
  */
 export function decodePubSubMessage(req: Request): PubSubMessage {
   // Ensure body.message.data exists (Pub/Sub format)
-  const data = decodeJsonPayload<PubSubMessage>(req);
-  if (!data.name) {
-    throw new Error("Missing filename in payload");
-  }
-  return data;
-}
-
-export function decodeJsonPayload<T>(req: Request): T {
   if (!req.body?.message?.data) {
     throw new Error("No message data found in request");
   }
 
-  const messageId = getJobId(req);
+  const messageId = getJobId(req) ?? "unknown";
   const message = Buffer.from(req.body.message.data, "base64").toString("utf8");
 
-  let data: T;
+  let data: PubSubMessage;
   try {
     data = JSON.parse(message);
   } catch (parseError) {
     throw new Error("Invalid JSON in message");
   }
 
-  logger.debug("Decoded Pub/Sub message", { jobId: messageId, payload: data });
+  if (!data.name) {
+    throw new Error("Missing filename in payload");
+  }
+
+  if (serviceConfig.environment !== "production") {
+    logger.debug("Decoded Pub/Sub message", { jobId: messageId, payload: data });
+  }
 
   return data;
 }
@@ -59,9 +58,8 @@ export function decodeJsonPayload<T>(req: Request): T {
 export function logRequest(req: Request): void {
   const jobId = getJobId(req);
   logger.info("Received Pub/Sub event", {
-    jobId,
+    jobId: jobId ?? "unknown",
     component: "pubsubHandler",
-    messageId: jobId,
     subscription: req.headers["ce-subject"],
     attributes: req.body?.message?.attributes,
   });
