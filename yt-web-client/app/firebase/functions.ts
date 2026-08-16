@@ -3,9 +3,15 @@ import { functions } from "./firebase";
 
 const generateUploadUrl = httpsCallable(functions, "generateUploadUrl");
 const getVideosFunction = httpsCallable(functions, "getVideos");
-const getTranscriptUrlFunction = httpsCallable(
+const getTranscriptUrlFunction = httpsCallable(functions, "getTranscriptUrl");
+const getNotesUrlFunction = httpsCallable(functions, "getNotesUrl");
+const getNotesFeatureFlagFunction = httpsCallable(
   functions,
-  "getTranscriptUrl",
+  "getNotesFeatureFlag",
+);
+const setNotesFeatureFlagFunction = httpsCallable(
+  functions,
+  "setNotesFeatureFlag",
 );
 
 export interface Video {
@@ -24,6 +30,12 @@ export interface TranscriptResponse {
   durationSeconds: number;
   language?: string;
   model?: string;
+}
+
+export interface NotesResponse {
+  url: string;
+  noteId: string;
+  promptVersion: string;
 }
 
 export async function getVideos(): Promise<Video[]> {
@@ -74,4 +86,25 @@ export async function getTranscriptUrl(
     throw new Error("Transcript URL not available");
   }
   return response.data as TranscriptResponse;
+}
+
+export async function getNotesUrl(
+  videoId: string,
+  noteId: string,
+): Promise<NotesResponse> {
+  const response: any = await getNotesUrlFunction({ videoId, noteId });
+  if (!response?.data?.url) {
+    throw new Error("Notes URL not available");
+  }
+  return response.data as NotesResponse;
+}
+
+export async function getNotesFeatureFlag(): Promise<boolean> {
+  const response: any = await getNotesFeatureFlagFunction();
+  return Boolean(response?.data?.notesEnabled ?? true);
+}
+
+export async function setNotesFeatureFlag(enabled: boolean): Promise<boolean> {
+  const response: any = await setNotesFeatureFlagFunction({ enabled });
+  return Boolean(response?.data?.notesEnabled ?? enabled);
 }

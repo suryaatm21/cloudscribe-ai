@@ -17,6 +17,7 @@ The project is a monorepo composed of three main services:
 1.  **`yt-web-client`**: A [Next.js](https://nextjs.org/) frontend that provides the user interface for video upload and viewing. It handles user authentication via Firebase.
 2.  **`api-service`**: A set of [Firebase Functions](https://firebase.google.com/docs/functions) (written in TypeScript) that provide the backend API for the web client. This includes functions for generating signed URLs for video uploads and managing user data.
 3.  **`video-processing-service`**: A Node.js service (using Express) that listens for new video uploads via Google Cloud Pub/Sub. When a new video is uploaded to the `raw-videos` bucket, this service is triggered to process it and move it to the `processed-videos` bucket.
+4.  **`notes-service`**: A Cloud Run Node.js service that consumes Pub/Sub jobs once transcripts are complete, loads the selected prompt template, calls Vertex AI Gemini to generate study notes, persists metadata to Firestore, and writes rendered markdown into the dedicated `notes/` bucket.
 
 These services interact with the following Google Cloud services:
 
@@ -72,6 +73,18 @@ cd video-processing-service
 ./deploy.sh
 ```
 
+### 4. Notes Service Status
+
+✅ **Cloud Run Ready**  
+The AI notes service generates markdown summaries from completed transcripts. Deploy via Cloud Build once infrastructure has been provisioned with `./scripts/setup-notes-infra.sh`.
+
+To redeploy after changes:
+
+```bash
+cd notes-service
+./deploy.sh
+```
+
 ### 4. Run the Upload → Processing Smoke Test
 
 Use the scripted workflow to validate the upload ➜ Pub/Sub ➜ Cloud Run path end-to-end.
@@ -89,6 +102,7 @@ export SMOKE_PROCESSED_BUCKET=atmuri-yt-processed-videos
 ```
 
 The script uploads the sample file, polls Firestore until status becomes `processed`, and confirms the processed object exists in Cloud Storage. Two consecutive successful runs satisfy the Sprint 01 stabilization acceptance criteria.
+The same script now waits for the notes service to emit a `videos/{videoId}/notes/{noteId}` document and verifies that the rendered markdown object exists in the `notes` bucket, ensuring end-to-end coverage for Sprint 3.
 
 ## 🛣️ Next Steps
 

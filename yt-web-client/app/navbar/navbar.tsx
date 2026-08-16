@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { onAuthStateChangedHelper } from "../firebase/firebase";
 import { User } from "firebase/auth";
 import Upload from "./upload";
+import NotesToggle from "./notes-toggle";
 
 
 function NavBar() {
@@ -31,9 +32,12 @@ function NavBar() {
           <img className={styles.logo} src="/youtube-logo.svg" alt="YouTube Logo" />
         </span>
       </Link>
-      {
-        user && <Upload /> // Show upload button only if user is authenticated hence the && operator
-      }
+      {user && (
+        <>
+          <Upload />
+          <NotesToggle />
+        </>
+      )}
       <SignIn user={user} />
     </nav>
   );

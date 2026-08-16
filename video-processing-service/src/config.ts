@@ -4,9 +4,11 @@ interface IServiceConfig {
   audioWorkBucketName: string;
   transcriptsBucketName: string;
   transcriptionTopicName: string;
+  notesTopicName: string;
   speechToTextModel: string;
   speechToTextLanguage: string;
   enableTranscription: boolean;
+  enableNotes: boolean;
   processingMaxAttempts: number;
   projectId?: string;
   region?: string;
@@ -53,9 +55,11 @@ export const serviceConfig: IServiceConfig = {
     getEnvVar("TRANSCRIPTS_BUCKET_NAME") ?? "atmuri-yt-transcripts",
   transcriptionTopicName:
     getEnvVar("TRANSCRIPTION_TOPIC_NAME") ?? "transcription-jobs",
+  notesTopicName: getEnvVar("NOTES_TOPIC_NAME") ?? "notes-jobs",
   speechToTextModel: getEnvVar("SPEECH_TO_TEXT_MODEL") ?? "long",
   speechToTextLanguage: getEnvVar("SPEECH_TO_TEXT_LANGUAGE") ?? "en-US",
   enableTranscription: getBooleanEnvVar("ENABLE_TRANSCRIPTION", true),
+  enableNotes: getBooleanEnvVar("ENABLE_NOTES", true),
   processingMaxAttempts: getNumericEnvVar("PROCESSING_MAX_ATTEMPTS", 3),
   projectId: getEnvVar("PROJECT_ID"),
   region: getEnvVar("REGION"),

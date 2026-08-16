@@ -1,0 +1,28 @@
+.toggleContainer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-left: 1rem;
+  color: #f0f0f0;
+  font-size: 0.85rem;
+}
+
+.toggleButton {
+  background: #cc0000;
+  border: none;
+  color: #fff;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
+.toggleButton.enabled {
+  background: #1a7f37;
+}
+
+.statusText {
+  font-size: 0.75rem;
+  opacity: 0.85;
+}

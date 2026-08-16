@@ -1,0 +1,10 @@
+{
+  "id": "study-notes-v1.0.0",
+  "version": "1.0.0",
+  "template": "You are an AI study assistant. Produce structured study notes with sections for summary, key concepts, detailed outline, and action items. Use the following transcript segments with timestamps as your source of truth. Avoid inventing facts. Respond in GitHub-flavored Markdown.\n\nTranscript:\n{{transcript}}",
+  "metadata": {
+    "owner": "cloudscribe",
+    "useCase": "study-notes",
+    "language": "en-US"
+  }
+}

@@ -38,6 +38,42 @@ This document captures all required environment variables, service accounts, and
   - `roles/storage.objectAdmin` on both buckets
   - `roles/pubsub.subscriber` for processing subscription
 
+## Notes Service (`notes-service`)
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `PROJECT_ID` | ✅ | – | Google Cloud project hosting Artifact Registry and Cloud Run |
+| `REGION` | ✅ | `us-central1` | Region for the service and Artifact Registry repository |
+| `SERVICE_NAME` | ✅ | `notes-service` | Cloud Run service name |
+| `NOTES_BUCKET_NAME` | ✅ | `atmuri-yt-notes` | Bucket storing rendered markdown |
+| `PROMPTS_BUCKET_NAME` | ✅ | `atmuri-yt-notes-prompts` | Bucket mirroring prompt templates |
+| `NOTES_PROMPT_ID` | ✅ | `study-notes-v1.0.0` | Default prompt template identifier |
+| `VERTEXAI_PROJECT_ID` | ✅ | – | Project ID with Vertex AI enabled |
+| `VERTEXAI_REGION` | ✅ | `us-central1` | Region for Gemini requests |
+| `VERTEXAI_MODEL` | ✅ | `gemini-1.5-pro` | Vertex AI Gemini model name |
+| `VERTEXAI_SAFETY_TIER` | ➖ | `BLOCK_MEDIUM_AND_ABOVE` | Harm block threshold |
+| `ENABLE_NOTES` | ➖ | `true` | Master kill switch for notes generation |
+| `CACHE_TTL_MS` | ➖ | `300000` | Cache TTL for prompt and feature flags |
+| `LOG_LEVEL` | ➖ | `info` | Log verbosity |
+
+**Required APIs**
+
+- Cloud Run Admin API
+- Artifact Registry API
+- Vertex AI API
+- Pub/Sub API
+- Cloud Storage JSON API
+- Firestore API
+
+**Service Accounts**
+
+- `notes-service@<PROJECT_ID>.iam.gserviceaccount.com`
+  - `roles/run.invoker`, `roles/run.admin`
+  - `roles/aiplatform.user` for Vertex AI access
+  - `roles/storage.objectAdmin` on the notes bucket
+  - `roles/storage.objectViewer` on the prompts bucket
+  - `roles/pubsub.subscriber` on the `notes-jobs` subscription
+
 ## Firebase Functions API (`api-service/functions`)
 
 | Variable | Required | Default | Description |

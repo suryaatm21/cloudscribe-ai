@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node", "jest"],
+    "lib": ["es2022"],
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts", "prompts/**/*.json"],
+  "exclude": ["node_modules", "dist"]
+}

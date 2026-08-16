@@ -24,6 +24,7 @@ import {
   uploadTranscriptPayload,
 } from "./transcription";
 import { TranscriptionJobPayload } from "./transcriptionQueue";
+import { triggerNotesJob } from "./notesTrigger";
 
 const app = express();
 app.use(express.json());
@@ -172,6 +173,22 @@ app.post(
         segmentCount: transcriptPayload.segments.length,
         durationSeconds: transcriptPayload.durationSeconds,
       });
+      const userId = transcript.userId ?? videoId.split("-")[0];
+      try {
+        await triggerNotesJob({
+          videoId,
+          transcriptId,
+          gcsPath,
+          userId,
+        });
+      } catch (notesError) {
+        logger.error("Failed to trigger notes job", {
+          component: "notesTrigger",
+          videoId,
+          transcriptId,
+          error: notesError instanceof Error ? notesError.message : notesError,
+        });
+      }
 
       sendSuccessResponse(res, "Transcription completed");
     } catch (error) {

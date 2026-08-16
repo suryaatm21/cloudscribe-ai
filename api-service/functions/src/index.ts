@@ -9,7 +9,7 @@
 
 import * as functions from "firebase-functions/v1";
 import {initializeApp} from "firebase-admin/app";
-import {Firestore} from "firebase-admin/firestore";
+import {Firestore, FieldValue} from "firebase-admin/firestore";
 import {getAuth} from "firebase-admin/auth";
 import * as logger from "firebase-functions/logger";
 import {Storage} from "@google-cloud/storage";
@@ -22,6 +22,9 @@ const firestore = new Firestore();
 const adminAuth = getAuth();
 
 const videoCollectionId = "videos";
+const userCollectionId = "users";
+const userSettingsCollectionId = "settings";
+const userPreferencesDocId = "preferences";
 export interface Video {
   id?: string;
   uid?: string;
@@ -38,6 +41,16 @@ interface TranscriptDoc {
   model?: string;
   segmentCount?: number;
   durationSeconds?: number;
+}
+
+interface NoteDoc {
+  status?: "pending" | "running" | "failed" | "done";
+  gcsPath?: string;
+  promptVersion?: string;
+}
+
+interface UserSettingsDoc {
+  notesEnabled?: boolean;
 }
 
 export const createUser = functions.auth.user().onCreate((user) => {
@@ -169,22 +182,7 @@ export const getTranscriptUrl = onCall(
       );
     }
 
-    const videoSnapshot = await firestore
-      .collection(videoCollectionId)
-      .doc(videoId)
-      .get();
-
-    if (!videoSnapshot.exists) {
-      throw new functions.https.HttpsError("not-found", "Video not found");
-    }
-
-    const videoData = videoSnapshot.data() as Video;
-    if (videoData.uid !== request.auth.uid) {
-      throw new functions.https.HttpsError(
-        "permission-denied",
-        "You do not have access to this transcript",
-      );
-    }
+    const videoSnapshot = await fetchOwnedVideo(videoId, request.auth.uid);
 
     const transcriptSnapshot = await videoSnapshot.ref
       .collection("transcripts")
@@ -227,6 +225,93 @@ export const getTranscriptUrl = onCall(
   },
 );
 
+/**
+ * Returns a signed URL for a generated notes artifact when the caller owns the video.
+ */
+export const getNotesUrl = onCall({maxInstances: 1}, async (request) => {
+  if (!request.auth) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "Authentication required",
+    );
+  }
+  const {videoId, noteId} = request.data ?? {};
+  if (!videoId || !noteId) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "videoId and noteId are required",
+    );
+  }
+  const videoSnapshot = await fetchOwnedVideo(videoId, request.auth.uid);
+  const noteSnapshot = await videoSnapshot.ref.collection("notes").doc(noteId).get();
+  if (!noteSnapshot.exists) {
+    throw new functions.https.HttpsError("not-found", "Notes not found");
+  }
+  const note = noteSnapshot.data() as NoteDoc;
+  if (note.status !== "done" || !note.gcsPath) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "Notes not ready",
+    );
+  }
+  const gcsParts = parseGcsUri(note.gcsPath);
+  const [url] = await storage
+    .bucket(gcsParts.bucket)
+    .file(gcsParts.path)
+    .getSignedUrl({
+      version: "v4",
+      action: "read",
+      expires: Date.now() + 15 * 60 * 1000,
+    });
+  return {
+    url,
+    noteId,
+    promptVersion: note.promptVersion ?? "unknown",
+  };
+});
+
+/**
+ * Reads the caller's notes feature flag preference.
+ */
+export const getNotesFeatureFlag = onCall({maxInstances: 1}, async (request) => {
+  if (!request.auth) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "Authentication required",
+    );
+  }
+  const snapshot = await userSettingsRef(request.auth.uid).get();
+  const settings = snapshot.data() as UserSettingsDoc | undefined;
+  return {notesEnabled: settings?.notesEnabled ?? true};
+});
+
+/**
+ * Updates the caller's notes feature flag preference.
+ */
+export const setNotesFeatureFlag = onCall({maxInstances: 1}, async (request) => {
+  if (!request.auth) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "Authentication required",
+    );
+  }
+  const {enabled} = request.data ?? {};
+  if (typeof enabled !== "boolean") {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "enabled boolean is required",
+    );
+  }
+  await userSettingsRef(request.auth.uid).set(
+    {
+      notesEnabled: enabled,
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    {merge: true},
+  );
+  return {notesEnabled: enabled};
+});
+
 function parseGcsUri(uri: string): {bucket: string; path: string} {
   if (!uri.startsWith("gs://")) {
     throw new Error("Invalid GCS URI");
@@ -237,4 +322,44 @@ function parseGcsUri(uri: string): {bucket: string; path: string} {
     bucket,
     path: pathParts.join("/"),
   };
+}
+
+/**
+ * Retrieves a video document and enforces caller ownership.
+ * @param videoId Video identifier.
+ * @param uid Authenticated user identifier.
+ * @returns Snapshot of the requested video document.
+ */
+async function fetchOwnedVideo(
+  videoId: string,
+  uid: string,
+): Promise<FirebaseFirestore.DocumentSnapshot> {
+  const videoSnapshot = await firestore
+    .collection(videoCollectionId)
+    .doc(videoId)
+    .get();
+  if (!videoSnapshot.exists) {
+    throw new functions.https.HttpsError("not-found", "Video not found");
+  }
+  const videoData = videoSnapshot.data() as Video;
+  if (videoData.uid !== uid) {
+    throw new functions.https.HttpsError(
+      "permission-denied",
+      "You do not have access to this resource",
+    );
+  }
+  return videoSnapshot;
+}
+
+/**
+ * Resolves the Firestore document storing a user's preferences.
+ * @param uid Authenticated user identifier.
+ * @returns Reference to the preferences document.
+ */
+function userSettingsRef(uid: string) {
+  return firestore
+    .collection(userCollectionId)
+    .doc(uid)
+    .collection(userSettingsCollectionId)
+    .doc(userPreferencesDocId);
 }
