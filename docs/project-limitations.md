@@ -25,6 +25,14 @@
 - **Potential Solution:**
   - Use a shared types package (e.g., `utils/types/video.ts`) and import it everywhere (backend, frontend, functions) for end-to-end type safety.
 
+## Processed Video Quality And Raw Retention
+
+- **Current:** `convertVideo` no longer applies `-vf scale=-1:360`. Sprint 2 dropped the downscale so the processed object (and the FLAC extracted from it) keep source resolution. Raw objects in `atmuri-yt-raw-videos` are also never deleted; `deleteRawVideo` only removes the local temp copy.
+- **Tradeoff:** Processed videos and raw originals consume more storage than a 360p pipeline with raw expiry.
+- **Potential Solutions:**
+  - Reintroduce an explicit, configurable scale filter if product wants a standard watch resolution.
+  - Add lifecycle expiry on the raw bucket (tracked for the security-hardening pass).
+
 ## Video ID/Processing Strategy
 
 - **Current:** The full filename is used as the video ID, so the watch page can render the video directly.
