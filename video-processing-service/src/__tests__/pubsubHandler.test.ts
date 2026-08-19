@@ -1,5 +1,9 @@
 import { Request } from "express";
-import { decodePubSubMessage, logRequest } from "../pubsubHandler";
+import {
+  decodeJsonPayload,
+  decodePubSubMessage,
+  logRequest,
+} from "../pubsubHandler";
 import { logger } from "../logger";
 
 jest.mock("../logger", () => ({
@@ -19,11 +23,15 @@ describe("pubsubHandler", () => {
     } as unknown as Request;
   }
 
+  function encode(data: unknown): string {
+    return Buffer.from(JSON.stringify(data)).toString("base64");
+  }
+
   it("decodes a valid Pub/Sub message", () => {
     const data = { name: "user-video.mp4" };
     const req = createRequest({
       message: {
-        data: Buffer.from(JSON.stringify(data)).toString("base64"),
+        data: encode(data),
       },
     });
 
@@ -31,18 +39,60 @@ describe("pubsubHandler", () => {
     expect(decoded).toEqual(data);
   });
 
-  it("throws when payload is missing", () => {
+  it("throws when the Pub/Sub envelope is malformed", () => {
     const req = createRequest({});
-    expect(() => decodePubSubMessage(req)).toThrow("No message data found in request");
+    expect(() => decodePubSubMessage(req)).toThrow(
+      "No message data found in request",
+    );
+  });
+
+  it("throws when message.data is missing from the envelope", () => {
+    const req = createRequest({ message: { messageId: "1" } });
+    expect(() => decodeJsonPayload(req)).toThrow(
+      "No message data found in request",
+    );
   });
 
   it("throws when name field is missing", () => {
     const req = createRequest({
       message: {
-        data: Buffer.from(JSON.stringify({ invalid: true })).toString("base64"),
+        data: encode({ invalid: true }),
       },
     });
-    expect(() => decodePubSubMessage(req)).toThrow("Missing filename in payload");
+    expect(() => decodePubSubMessage(req)).toThrow(
+      "Missing filename in payload",
+    );
+  });
+
+  it("rejects a JSON null payload", () => {
+    const req = createRequest({
+      message: {
+        data: Buffer.from("null").toString("base64"),
+      },
+    });
+    expect(() => decodeJsonPayload(req)).toThrow(
+      "Decoded payload is not an object",
+    );
+  });
+
+  it("rejects a non-object JSON payload", () => {
+    const req = createRequest({
+      message: {
+        data: Buffer.from("[]").toString("base64"),
+      },
+    });
+    expect(() => decodeJsonPayload(req)).toThrow(
+      "Decoded payload is not an object",
+    );
+  });
+
+  it("throws when the envelope body is not JSON", () => {
+    const req = createRequest({
+      message: {
+        data: Buffer.from("not-json").toString("base64"),
+      },
+    });
+    expect(() => decodeJsonPayload(req)).toThrow("Invalid JSON in message");
   });
 
   it("logs metadata for each request", () => {
@@ -50,7 +100,7 @@ describe("pubsubHandler", () => {
     const req = {
       body: {
         message: {
-          data: Buffer.from(JSON.stringify({ name: "abc.mp4" })).toString("base64"),
+          data: encode({ name: "abc.mp4" }),
           messageId: "123",
           attributes: { attempt: "1" },
         },
@@ -70,4 +120,3 @@ describe("pubsubHandler", () => {
     );
   });
 });
-
