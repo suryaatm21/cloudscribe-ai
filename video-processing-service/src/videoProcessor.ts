@@ -158,11 +158,18 @@ export function uidFromVideoId(videoId: string): string | null {
   if (!videoId) {
     return null;
   }
+  if (videoId.includes("/") || /[\n\r\0]/.test(videoId)) {
+    return null;
+  }
   const match = videoId.match(/^(.*)-(\d{10,})$/);
   if (!match || !match[1]) {
     return null;
   }
-  return match[1];
+  const uid = match[1];
+  if (uid.includes("/") || /[\n\r\0]/.test(uid)) {
+    return null;
+  }
+  return uid;
 }
 
 /**

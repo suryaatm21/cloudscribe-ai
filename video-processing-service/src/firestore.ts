@@ -31,7 +31,29 @@ export interface Video {
   description?: string;
 }
 
-export type TranscriptStatus = "pending" | "running" | "failed" | "done";
+/**
+ * Transcript job lifecycle.
+ *
+ * pending → running: only `/transcribe-audio` may claim, and only from pending.
+ * running → done: GCS notification or sweeper after Speech writes output.
+ * running → failed: Speech (or our pre-RPC validation) definitely never
+ *   started, or Speech completed with a recorded error.
+ * running → needs_review: Speech RPC may already have been accepted (timeout,
+ *   or failure while persisting operationName). Terminal for automatic retries
+ *   so we never start a second billed job; a human or the sweeper adjudicates.
+ * failed and needs_review are terminal for `/transcribe-audio`.
+ */
+export type TranscriptStatus =
+  | "pending"
+  | "running"
+  | "failed"
+  | "done"
+  | "needs_review";
+
+export const RECONCILE_TRANSCRIPT_STATUSES: TranscriptStatus[] = [
+  "running",
+  "needs_review",
+];
 
 export interface TranscriptDocument {
   id?: string;
@@ -54,13 +76,16 @@ export interface TranscriptDocument {
 export type TranscriptClaimResult =
   | { kind: "missing" }
   | { kind: "already-done" }
+  | { kind: "terminal-failed" }
+  | { kind: "needs-review" }
   | { kind: "reuse-operation"; operationName: string }
   | { kind: "claim-in-progress" }
   | { kind: "claimed" };
 
 /**
  * Pure decision for the atomic Speech-job claim.
- * A second concurrent start is rejected once status is `running`.
+ * Only `pending` may transition to `running`. `failed` and `needs_review`
+ * are terminal for automatic retries.
  */
 export function evaluateTranscriptClaim(
   transcript: TranscriptDocument | undefined,
@@ -71,16 +96,39 @@ export function evaluateTranscriptClaim(
   if (transcript.status === "done") {
     return { kind: "already-done" };
   }
-  if (transcript.operationName) {
-    return {
-      kind: "reuse-operation",
-      operationName: transcript.operationName,
-    };
+  if (transcript.status === "failed") {
+    return { kind: "terminal-failed" };
+  }
+  if (transcript.status === "needs_review") {
+    return { kind: "needs-review" };
   }
   if (transcript.status === "running") {
+    if (transcript.operationName) {
+      return {
+        kind: "reuse-operation",
+        operationName: transcript.operationName,
+      };
+    }
     return { kind: "claim-in-progress" };
   }
-  return { kind: "claimed" };
+  if (transcript.status === "pending") {
+    return { kind: "claimed" };
+  }
+  return { kind: "claim-in-progress" };
+}
+
+export function wasTranscriptClaimed(
+  transcript: TranscriptDocument | undefined,
+): boolean {
+  if (!transcript) {
+    return false;
+  }
+  return (
+    transcript.status === "running" ||
+    transcript.status === "needs_review" ||
+    transcript.status === "failed" ||
+    transcript.status === "done"
+  );
 }
 
 /**
@@ -189,7 +237,7 @@ export async function updateTranscriptStatus(
 
 /**
  * Reserves a transcript for Speech-to-Text in a transaction so a concurrent
- * delivery cannot start a second billable job.
+ * delivery cannot start a second billable job. Only `pending` is claimable.
  */
 export async function claimTranscriptJob(
   videoId: string,
@@ -219,10 +267,12 @@ export async function claimTranscriptJob(
   });
 }
 
-export async function listRunningTranscripts(): Promise<TranscriptDocument[]> {
+export async function listTranscriptsForReconcile(): Promise<
+  TranscriptDocument[]
+> {
   const snapshot = await firestore
     .collectionGroup(transcriptCollectionId)
-    .where("status", "==", "running")
+    .where("status", "in", RECONCILE_TRANSCRIPT_STATUSES)
     .get();
   return snapshot.docs.map((doc) => ({
     id: doc.id,

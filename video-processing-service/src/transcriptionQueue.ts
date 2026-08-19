@@ -9,7 +9,6 @@ export interface TranscriptionJobPayload {
   transcriptId: string;
   audioGcsUri: string;
   userId?: string;
-  operationName?: string;
 }
 
 export async function publishTranscriptionJob(payload: TranscriptionJobPayload) {

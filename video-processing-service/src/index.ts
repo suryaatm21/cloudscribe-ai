@@ -8,11 +8,12 @@ import {
   claimTranscriptJob,
   getTranscript,
   isVideoNew,
-  listRunningTranscripts,
+  listTranscriptsForReconcile,
   setVideo,
   timestampToMillis,
   updateTranscript,
   updateTranscriptStatus,
+  wasTranscriptClaimed,
 } from "./firestore";
 import {
   processVideo,
@@ -30,16 +31,19 @@ import {
 } from "./pubsubHandler";
 import { logger } from "./logger";
 import {
+  classifySpeechStartFailure,
   finalizeTranscriptFromRawObject,
   GcsObjectNotification,
   inspectBatchRecognizeOperation,
+  isConfiguredTranscriptsBucket,
+  parseGsUri,
   parseRawTranscriptObjectName,
   startTranscriptionJob,
 } from "./transcription";
 import { TranscriptionJobPayload } from "./transcriptionQueue";
 import { serviceConfig } from "./config";
 
-const app = express();
+export const app = express();
 app.use(express.json());
 
 setupDirectories();
@@ -142,6 +146,14 @@ app.post(
   async (req: Request, res: Response): Promise<void> => {
     logRequest(req);
 
+    if (!serviceConfig.enableTranscription) {
+      logger.info("Skipping transcription; ENABLE_TRANSCRIPTION is false", {
+        component: "transcription",
+      });
+      sendSuccessResponse(res, "Transcription disabled");
+      return;
+    }
+
     let payload: TranscriptionJobPayload;
     try {
       payload = decodeJsonPayload<TranscriptionJobPayload>(req);
@@ -168,15 +180,22 @@ app.post(
           videoId,
           transcriptId,
         });
-        await updateTranscriptStatus(videoId, transcriptId, "failed", {
-          error: "Transcript metadata missing",
-        });
         sendAcknowledgmentResponse(res);
         return;
       }
 
       if (claim.kind === "already-done") {
         sendSuccessResponse(res, "Transcript already completed");
+        return;
+      }
+
+      if (claim.kind === "terminal-failed") {
+        sendSuccessResponse(res, "Transcript already failed");
+        return;
+      }
+
+      if (claim.kind === "needs-review") {
+        sendSuccessResponse(res, "Transcript start needs review");
         return;
       }
 
@@ -201,22 +220,69 @@ app.post(
         return;
       }
 
-      const operationName = await startTranscriptionJob(
-        audioGcsUri,
-        videoId,
-        transcriptId,
-      );
-      await updateTranscript(videoId, transcriptId, { operationName });
-      sendSuccessResponse(res, "Transcription job started");
+      let operationName: string;
+      try {
+        operationName = await startTranscriptionJob(
+          audioGcsUri,
+          videoId,
+          transcriptId,
+        );
+      } catch (startError) {
+        const classified = classifySpeechStartFailure(startError);
+        if (classified.certainty === "never-started") {
+          logger.error("Speech RPC definitely never started", {
+            component: "transcription",
+            videoId,
+            transcriptId,
+            error: classified.message,
+          });
+          await updateTranscriptStatus(videoId, transcriptId, "failed", {
+            error: classified.message,
+          });
+          sendSuccessResponse(res, "Transcription job rejected");
+          return;
+        }
+
+        logger.error("Speech RPC may have started; leaving for review", {
+          component: "transcription",
+          videoId,
+          transcriptId,
+          error: classified.message,
+        });
+        await updateTranscriptStatus(videoId, transcriptId, "needs_review", {
+          error: `Speech RPC may have started: ${classified.message}`,
+        });
+        sendSuccessResponse(res, "Transcription start needs review");
+        return;
+      }
+
+      try {
+        await updateTranscript(videoId, transcriptId, { operationName });
+        sendSuccessResponse(res, "Transcription job started");
+      } catch (persistError) {
+        const message =
+          persistError instanceof Error
+            ? persistError.message
+            : String(persistError);
+        logger.error("Speech accepted the job but operationName persist failed", {
+          component: "transcription",
+          videoId,
+          transcriptId,
+          operationName,
+          error: message,
+        });
+        await updateTranscriptStatus(videoId, transcriptId, "needs_review", {
+          operationName,
+          error: `Speech accepted the job but persisting operationName failed: ${message}`,
+        });
+        sendSuccessResponse(res, "Transcription start needs review");
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error("Transcription job failed to start", {
+      logger.error("Transcription claim path failed", {
         component: "transcription",
         videoId: payload.videoId,
         transcriptId: payload.transcriptId,
-        error: message,
-      });
-      await updateTranscriptStatus(payload.videoId, payload.transcriptId, "failed", {
         error: message,
       });
       res.status(500).send("Transcription job failed");
@@ -248,6 +314,16 @@ app.post(
       return;
     }
 
+    if (!isConfiguredTranscriptsBucket(bucketName)) {
+      logger.error("Ignoring transcript object from unexpected bucket", {
+        component: "transcription",
+        bucketName,
+        objectName,
+      });
+      sendAcknowledgmentResponse(res);
+      return;
+    }
+
     if (!objectName.startsWith(`${serviceConfig.rawTranscriptPrefix}/`)) {
       logger.info("Ignoring non-raw transcript object", {
         component: "transcription",
@@ -271,6 +347,17 @@ app.post(
 
     try {
       const transcript = await getTranscript(videoId, transcriptId);
+      if (!wasTranscriptClaimed(transcript)) {
+        logger.error("Refusing to finalize an unclaimed transcript", {
+          component: "transcription",
+          videoId,
+          transcriptId,
+          status: transcript?.status,
+        });
+        sendAcknowledgmentResponse(res);
+        return;
+      }
+
       if (transcript?.status === "done") {
         sendSuccessResponse(res, "Transcript already completed");
         return;
@@ -304,9 +391,6 @@ app.post(
         transcriptId,
         error: message,
       });
-      await updateTranscriptStatus(videoId, transcriptId, "failed", {
-        error: message,
-      });
       res.status(500).send("Transcript finalization failed");
     }
   },
@@ -321,10 +405,11 @@ app.post(
     let failed = 0;
     let recovered = 0;
     let stillRunning = 0;
+    let needsReview = 0;
 
     try {
-      const running = await listRunningTranscripts();
-      for (const transcript of running) {
+      const candidates = await listTranscriptsForReconcile();
+      for (const transcript of candidates) {
         const videoId = transcript.videoId;
         const transcriptId = transcript.id;
         if (!videoId || !transcriptId) {
@@ -342,10 +427,15 @@ app.post(
         inspected += 1;
 
         if (!transcript.operationName) {
-          await updateTranscriptStatus(videoId, transcriptId, "failed", {
-            error: "Speech job never started after claim",
+          if (transcript.status === "needs_review") {
+            needsReview += 1;
+            continue;
+          }
+          await updateTranscriptStatus(videoId, transcriptId, "needs_review", {
+            error:
+              "Claimed without a persisted Speech operationName; RPC may have started",
           });
-          failed += 1;
+          needsReview += 1;
           continue;
         }
 
@@ -374,9 +464,25 @@ app.post(
         }
 
         const rawObject = parseGsUri(inspection.outputUri);
-        if (!rawObject) {
+        if (
+          !rawObject ||
+          !isConfiguredTranscriptsBucket(rawObject.bucket)
+        ) {
           await updateTranscriptStatus(videoId, transcriptId, "failed", {
-            error: `Unparseable Speech output URI: ${inspection.outputUri}`,
+            error: `Unparseable or untrusted Speech output URI: ${inspection.outputUri}`,
+          });
+          failed += 1;
+          continue;
+        }
+
+        const parsedOutput = parseRawTranscriptObjectName(rawObject.path);
+        if (
+          !parsedOutput ||
+          parsedOutput.videoId !== videoId ||
+          parsedOutput.transcriptId !== transcriptId
+        ) {
+          await updateTranscriptStatus(videoId, transcriptId, "failed", {
+            error: `Speech output path did not match claimed transcript: ${inspection.outputUri}`,
           });
           failed += 1;
           continue;
@@ -406,6 +512,7 @@ app.post(
         failed,
         recovered,
         stillRunning,
+        needsReview,
       });
     } catch (error) {
       logger.error("Transcript reconciliation failed", {
@@ -417,30 +524,20 @@ app.post(
   },
 );
 
-function parseGsUri(
-  uri: string,
-): { bucket: string; path: string } | undefined {
-  if (!uri.startsWith("gs://")) {
-    return undefined;
-  }
-  const withoutScheme = uri.slice("gs://".length);
-  const slash = withoutScheme.indexOf("/");
-  if (slash <= 0 || slash === withoutScheme.length - 1) {
-    return undefined;
-  }
-  return {
-    bucket: withoutScheme.slice(0, slash),
-    path: withoutScheme.slice(slash + 1),
-  };
+const port = process.env.PORT || 3000;
+
+export function startServer() {
+  return app.listen(port, () => {
+    logger.info("Video processing service started", {
+      component: "bootstrap",
+      port,
+    });
+    logger.info("Ready to process videos from Pub/Sub", {
+      component: "bootstrap",
+    });
+  });
 }
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  logger.info("Video processing service started", {
-    component: "bootstrap",
-    port,
-  });
-  logger.info("Ready to process videos from Pub/Sub", {
-    component: "bootstrap",
-  });
-});
+if (process.env.JEST_WORKER_ID === undefined) {
+  startServer();
+}

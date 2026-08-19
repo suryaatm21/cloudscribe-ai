@@ -73,6 +73,41 @@ export interface BatchRecognizeInspection {
   outputUri?: string;
 }
 
+export interface ParsedRawTranscriptObject {
+  videoId: string;
+  transcriptId: string;
+  outputFile: string;
+}
+
+export type SpeechStartCertainty = "never-started" | "maybe-started";
+
+export class SpeechJobStartError extends Error {
+  readonly certainty: SpeechStartCertainty;
+
+  constructor(message: string, certainty: SpeechStartCertainty) {
+    super(message);
+    this.name = "SpeechJobStartError";
+    this.certainty = certainty;
+  }
+}
+
+/**
+ * gRPC codes that mean the server rejected the request before accepting a
+ * batch job. Codes like DEADLINE_EXCEEDED (4) and UNAVAILABLE (14) are
+ * omitted: the RPC may already have been accepted.
+ */
+const NEVER_STARTED_GRPC_CODES = new Set([
+  3, // INVALID_ARGUMENT
+  5, // NOT_FOUND
+  6, // ALREADY_EXISTS
+  7, // PERMISSION_DENIED
+  9, // FAILED_PRECONDITION
+  11, // OUT_OF_RANGE
+  16, // UNAUTHENTICATED
+]);
+
+const SAFE_OBJECT_ID = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
 let speechClient: v2.SpeechClient | undefined;
 
 function getSpeechClient(): v2.SpeechClient {
@@ -109,19 +144,72 @@ export function normalizedTranscriptObjectPath(
   return `${serviceConfig.normalizedTranscriptPrefix}/${videoId}/${transcriptId}.json`;
 }
 
+export function isSafeObjectId(value: string): boolean {
+  return SAFE_OBJECT_ID.test(value);
+}
+
+function isSafeOutputFile(value: string): boolean {
+  if (!value || value.length > 256) {
+    return false;
+  }
+  if (value.includes("/") || /[\n\r\0]/.test(value)) {
+    return false;
+  }
+  if (value === "." || value === ".." || value.includes("..")) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Strict `raw/{videoId}/{transcriptId}/{outputFile}` parser.
+ * Extra path components, a missing filename, or unsafe IDs are rejected.
+ */
 export function parseRawTranscriptObjectName(
   objectName: string,
-): { videoId: string; transcriptId: string } | undefined {
+): ParsedRawTranscriptObject | undefined {
   const prefix = `${serviceConfig.rawTranscriptPrefix}/`;
   if (!objectName.startsWith(prefix)) {
     return undefined;
   }
   const rest = objectName.slice(prefix.length);
-  const [videoId, transcriptId] = rest.split("/");
-  if (!videoId || !transcriptId) {
+  if (!rest || rest.endsWith("/")) {
     return undefined;
   }
-  return { videoId, transcriptId };
+  const parts = rest.split("/");
+  if (parts.length !== 3) {
+    return undefined;
+  }
+  const [videoId, transcriptId, outputFile] = parts;
+  if (
+    !isSafeObjectId(videoId) ||
+    !isSafeObjectId(transcriptId) ||
+    !isSafeOutputFile(outputFile)
+  ) {
+    return undefined;
+  }
+  return { videoId, transcriptId, outputFile };
+}
+
+export function parseGsUri(
+  uri: string,
+): { bucket: string; path: string } | undefined {
+  if (!uri.startsWith("gs://")) {
+    return undefined;
+  }
+  const withoutScheme = uri.slice("gs://".length);
+  const slash = withoutScheme.indexOf("/");
+  if (slash <= 0 || slash === withoutScheme.length - 1) {
+    return undefined;
+  }
+  return {
+    bucket: withoutScheme.slice(0, slash),
+    path: withoutScheme.slice(slash + 1),
+  };
+}
+
+export function isConfiguredTranscriptsBucket(bucketName: string): boolean {
+  return bucketName === serviceConfig.transcriptsBucketName;
 }
 
 function speechV2Model(model: string): string {
@@ -131,13 +219,54 @@ function speechV2Model(model: string): string {
   return "long";
 }
 
+function grpcStatusCode(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return undefined;
+  }
+  const code = (error as { code: unknown }).code;
+  return typeof code === "number" ? code : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof (error as { message: unknown }).message === "string"
+  ) {
+    return (error as { message: string }).message;
+  }
+  return String(error);
+}
+
+export function classifySpeechStartFailure(error: unknown): {
+  certainty: SpeechStartCertainty;
+  message: string;
+} {
+  if (error instanceof SpeechJobStartError) {
+    return { certainty: error.certainty, message: error.message };
+  }
+  const message = errorMessage(error);
+  const code = grpcStatusCode(error);
+  if (code !== undefined && NEVER_STARTED_GRPC_CODES.has(code)) {
+    return { certainty: "never-started", message };
+  }
+  return { certainty: "maybe-started", message };
+}
+
 export async function startTranscriptionJob(
   audioGcsUri: string,
   videoId: string,
   transcriptId: string,
 ): Promise<string> {
   if (!audioGcsUri || !audioGcsUri.startsWith("gs://")) {
-    throw new Error(`Invalid GCS URI: ${audioGcsUri}`);
+    throw new SpeechJobStartError(
+      `Invalid GCS URI: ${audioGcsUri}`,
+      "never-started",
+    );
   }
 
   const outputPrefix = rawTranscriptObjectPrefix(videoId, transcriptId);
@@ -166,30 +295,42 @@ export async function startTranscriptionJob(
     processingStrategy: "DYNAMIC_BATCHING" as const,
   };
 
-  const [operation] = await getSpeechClient().batchRecognize(request);
-  if (!operation.name) {
-    throw new Error("Speech-to-Text did not return an operation name");
-  }
+  try {
+    const [operation] = await getSpeechClient().batchRecognize(request);
+    if (!operation.name) {
+      throw new SpeechJobStartError(
+        "Speech-to-Text did not return an operation name",
+        "maybe-started",
+      );
+    }
 
-  logger.info("Started transcription job", {
-    component: "transcription",
-    operationName: operation.name,
-    videoId,
-    transcriptId,
-    outputPrefix,
-  });
-  return operation.name;
+    logger.info("Started transcription job", {
+      component: "transcription",
+      operationName: operation.name,
+      videoId,
+      transcriptId,
+      outputPrefix,
+    });
+    return operation.name;
+  } catch (error) {
+    if (error instanceof SpeechJobStartError) {
+      throw error;
+    }
+    const classified = classifySpeechStartFailure(error);
+    throw new SpeechJobStartError(classified.message, classified.certainty);
+  }
 }
 
-export async function inspectBatchRecognizeOperation(
-  operationName: string,
-): Promise<BatchRecognizeInspection> {
-  if (!operationName) {
-    throw new Error("Operation name is required to inspect a Speech job");
-  }
-
-  const operation =
-    await getSpeechClient().checkBatchRecognizeProgress(operationName);
+/**
+ * Reads a google-gax LRO. The decoded `BatchRecognizeResponse` is
+ * `operation.result`. `operation.latestResponse` is the raw LRO envelope
+ * and does not contain `results`.
+ */
+export function inspectDecodedBatchRecognizeOperation(operation: {
+  done?: boolean;
+  error?: unknown;
+  result?: unknown;
+}): BatchRecognizeInspection {
   const done = Boolean(operation.done);
   const rpcError = operation.error;
 
@@ -208,32 +349,54 @@ export async function inspectBatchRecognizeOperation(
     return { done: true, error: message };
   }
 
-  const result = operation.latestResponse as
-    | {
-        results?: Record<
-          string,
-          {
-            error?: { message?: string | null } | null;
-            cloudStorageResult?: { uri?: string | null } | null;
-            uri?: string | null;
-          }
-        >;
-      }
-    | undefined;
+  const decoded = operation.result;
+  if (decoded === null || decoded === undefined || typeof decoded !== "object") {
+    return {
+      done: true,
+      error:
+        "Speech job completed without a BatchRecognizeResponse in operation.result",
+    };
+  }
 
-  const fileResults = result?.results ? Object.values(result.results) : [];
-  const firstError = fileResults.find((file) => file.error?.message);
+  const resultsField = (decoded as { results?: unknown }).results;
+  const fileResults = mapValues(resultsField);
+  if (fileResults.length === 0) {
+    return {
+      done: true,
+      error: "Speech job completed without a GCS result URI",
+    };
+  }
+
+  const firstError = fileResults.find((file) => {
+    if (typeof file !== "object" || file === null) {
+      return false;
+    }
+    const error = (file as { error?: { message?: string | null } | null }).error;
+    return Boolean(error?.message);
+  }) as { error?: { message?: string | null } | null } | undefined;
   if (firstError?.error?.message) {
     return { done: true, error: firstError.error.message };
   }
 
-  const outputUri = fileResults.find(
-    (file) => file.cloudStorageResult?.uri || file.uri,
-  );
+  const outputUri = fileResults
+    .map((file) => outputUriFromFileResult(file))
+    .find((uri): uri is string => Boolean(uri));
   return {
     done: true,
-    outputUri: outputUri?.cloudStorageResult?.uri ?? outputUri?.uri ?? undefined,
+    outputUri,
   };
+}
+
+export async function inspectBatchRecognizeOperation(
+  operationName: string,
+): Promise<BatchRecognizeInspection> {
+  if (!operationName) {
+    throw new Error("Operation name is required to inspect a Speech job");
+  }
+
+  const operation =
+    await getSpeechClient().checkBatchRecognizeProgress(operationName);
+  return inspectDecodedBatchRecognizeOperation(operation);
 }
 
 export function buildTranscriptPayload(
@@ -244,27 +407,29 @@ export function buildTranscriptPayload(
   const segments: ITranscriptSegment[] = [];
   let maxEnd = 0;
 
-  for (const result of results) {
-    const alternative = firstAlternative(result);
-    if (!alternative) {
-      continue;
-    }
+  results.forEach((result, index) => {
+    const alternative = firstAlternative(result, index);
     const text = stringField(alternative, "transcript")?.trim() ?? "";
     if (!text) {
-      continue;
+      throw new Error(
+        `Unexpected Speech v2 result JSON: results[${index}] is missing transcript text`,
+      );
     }
 
     const words = asArray(readField(alternative, "words"));
     const startTime =
       durationToSeconds(readField(words[0], "startOffset", "start_offset")) ??
-      durationToSeconds(readField(result, "resultEndOffset", "result_end_offset")) ??
-      0;
+      durationToSeconds(readField(result, "resultEndOffset", "result_end_offset"));
     const endTime =
       durationToSeconds(
         readField(words[words.length - 1], "endOffset", "end_offset"),
       ) ??
-      durationToSeconds(readField(result, "resultEndOffset", "result_end_offset")) ??
-      startTime;
+      durationToSeconds(readField(result, "resultEndOffset", "result_end_offset"));
+    if (startTime === undefined || endTime === undefined) {
+      throw new Error(
+        `Unexpected Speech v2 result JSON: results[${index}] is missing timing`,
+      );
+    }
     maxEnd = Math.max(maxEnd, endTime);
 
     const confidence = numberField(alternative, "confidence");
@@ -274,7 +439,7 @@ export function buildTranscriptPayload(
       endTime,
       confidence: confidence ?? undefined,
     });
-  }
+  });
 
   if (segments.length === 0) {
     throw new Error(
@@ -326,7 +491,11 @@ export async function uploadTranscriptPayload(
   if (!videoId) {
     throw new Error("videoId is required for transcript upload");
   }
-  if (!transcript || !Array.isArray(transcript.segments)) {
+  if (
+    !transcript ||
+    !Array.isArray(transcript.segments) ||
+    transcript.segments.length === 0
+  ) {
     throw new Error("Invalid transcript payload");
   }
 
@@ -365,6 +534,30 @@ export async function finalizeTranscriptFromRawObject(
   return { gcsPath, transcript };
 }
 
+function mapValues(value: unknown): unknown[] {
+  if (!value) {
+    return [];
+  }
+  if (value instanceof Map) {
+    return [...value.values()];
+  }
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>);
+  }
+  return [];
+}
+
+function outputUriFromFileResult(file: unknown): string | undefined {
+  if (typeof file !== "object" || file === null) {
+    return undefined;
+  }
+  const record = file as {
+    cloudStorageResult?: { uri?: string | null } | null;
+    uri?: string | null;
+  };
+  return record.cloudStorageResult?.uri ?? record.uri ?? undefined;
+}
+
 function extractSpeechV2Results(parsed: unknown): Record<string, unknown>[] {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(
@@ -391,15 +584,18 @@ function extractSpeechV2Results(parsed: unknown): Record<string, unknown>[] {
 
 function firstAlternative(
   result: Record<string, unknown>,
-): Record<string, unknown> | undefined {
+  index: number,
+): Record<string, unknown> {
   const alternatives = asArray(readField(result, "alternatives"));
   const first = alternatives[0];
   if (first === undefined) {
-    return undefined;
+    throw new Error(
+      `Unexpected Speech v2 result JSON: results[${index}] has no alternatives`,
+    );
   }
   if (first === null || typeof first !== "object" || Array.isArray(first)) {
     throw new Error(
-      "Unexpected Speech v2 result JSON: alternatives[0] is not an object",
+      `Unexpected Speech v2 result JSON: results[${index}].alternatives[0] is not an object`,
     );
   }
   return first as Record<string, unknown>;
@@ -424,6 +620,11 @@ export function durationToSeconds(value: unknown): number | undefined {
   }
   if (typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
+    if (!("seconds" in record) && !("nanos" in record)) {
+      throw new Error(
+        `Unexpected Speech v2 duration object: ${JSON.stringify(value)}`,
+      );
+    }
     const seconds = Number(record.seconds ?? 0);
     const nanos = Number(record.nanos ?? 0);
     if (!Number.isFinite(seconds) || !Number.isFinite(nanos)) {
