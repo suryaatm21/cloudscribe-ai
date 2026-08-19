@@ -4,16 +4,27 @@ import {
   deleteRawVideo,
   uploadProcessedVideo,
   deleteProcessedVideo,
+  extractAudio,
+  uploadAudioForTranscription,
+  deleteAudioWorkFile,
 } from "./storage";
-import { setVideo } from "./firestore";
+import {
+  createTranscript,
+  setVideo,
+  updateTranscriptStatus,
+} from "./firestore";
 import { serviceConfig } from "./config";
 import { logger } from "./logger";
+import { publishTranscriptionJob } from "./transcriptionQueue";
+
+const DEFAULT_TRANSCRIPT_ID = "primary";
 
 /**
  * Processes a video by downloading, converting, uploading, and updating its status.
  * @param {string} inputFileName - The name of the input video file.
  * @param {string} outputFileName - The name of the output video file.
  * @param {string} videoId - The unique identifier for the video.
+ * @param {string} userId - Owner uid persisted on the video and transcript docs.
  * @returns {Promise<void>} A promise that resolves when processing is complete.
  * @throws {Error} If any step in the video processing pipeline fails.
  */
@@ -21,6 +32,7 @@ export async function processVideo(
   inputFileName: string,
   outputFileName: string,
   videoId: string,
+  userId: string,
 ): Promise<void> {
   const maxAttempts = serviceConfig.processingMaxAttempts;
   let attempt = 0;
@@ -45,7 +57,12 @@ export async function processVideo(
       await setVideo(videoId, {
         status: "processed",
         filename: outputFileName,
+        uid: userId,
       });
+
+      if (serviceConfig.enableTranscription) {
+        await triggerTranscriptionPipeline(videoId, outputFileName, userId);
+      }
 
       await Promise.all([
         deleteRawVideo(inputFileName),
@@ -79,7 +96,7 @@ export async function processVideo(
     }
   }
 
-  await setVideo(videoId, { status: "failed" });
+  await setVideo(videoId, { status: "failed", uid: userId });
   const errorToThrow =
     lastError instanceof Error
       ? lastError
@@ -117,7 +134,11 @@ async function cleanupFiles(
   }
 }
 
-function videoIdFromFileNames(inputFileName: string): string | undefined {
+/**
+ * Dot-safe video id: everything except the final extension.
+ * `split(".")[0]` breaks on filenames that contain extra dots.
+ */
+export function videoIdFromFileNames(inputFileName: string): string | undefined {
   if (!inputFileName) {
     return undefined;
   }
@@ -127,4 +148,73 @@ function videoIdFromFileNames(inputFileName: string): string | undefined {
   }
   const candidate = segments.slice(0, -1).join(".");
   return candidate.length > 0 ? candidate : inputFileName;
+}
+
+/**
+ * Uploads name videos as `{uid}-{timestamp}.{ext}`. Strip the trailing
+ * numeric timestamp so hyphenated UIDs survive; `split("-")[0]` does not.
+ */
+export function uidFromVideoId(videoId: string): string | null {
+  if (!videoId) {
+    return null;
+  }
+  const match = videoId.match(/^(.*)-(\d{10,})$/);
+  if (!match || !match[1]) {
+    return null;
+  }
+  return match[1];
+}
+
+/**
+ * Triggers the asynchronous transcription pipeline for a processed video.
+ * Leaves the transcript at `pending`; `/transcribe-audio` claims it before Speech.
+ * @param videoId - The unique video identifier
+ * @param processedFileName - The processed video filename
+ * @param userId - The user ID who owns the video
+ */
+async function triggerTranscriptionPipeline(
+  videoId: string,
+  processedFileName: string,
+  userId: string,
+) {
+  const transcriptId = DEFAULT_TRANSCRIPT_ID;
+  const audioFileName = `${videoId}.flac`;
+
+  try {
+    await extractAudio(processedFileName, audioFileName);
+    const audioGcsUri = await uploadAudioForTranscription(audioFileName);
+
+    await createTranscript(videoId, transcriptId, {
+      status: "pending",
+      language: serviceConfig.speechToTextLanguage,
+      model: serviceConfig.speechToTextModel,
+      audioGcsUri,
+      userId,
+    });
+
+    await publishTranscriptionJob({
+      videoId,
+      transcriptId,
+      audioGcsUri,
+      userId,
+    });
+
+    logger.info("Queued transcription job", {
+      component: "videoProcessor",
+      videoId,
+      transcriptId,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("Failed to queue transcription job", {
+      component: "videoProcessor",
+      videoId,
+      transcriptId,
+      error: message,
+    });
+    await updateTranscriptStatus(videoId, transcriptId, "failed", {
+      error: message,
+    });
+    await deleteAudioWorkFile(audioFileName);
+  }
 }
