@@ -63,8 +63,9 @@ steps:
       - "--update-env-vars=PROCESSING_MAX_ATTEMPTS=3,ENABLE_TRANSCRIPTION=false,SERVICE_VERSION=$COMMIT_SHA"
       - "--labels=commit=$COMMIT_SHA"
 
-# Build timeout (10 minutes)
-timeout: "600s"
+# Build timeout sized for E2_STANDARD_2 (2 vCPU). The prior 600s budget
+# matched N1_HIGHCPU_8 (~4m last success); 2 vCPU can take ~3-4x longer.
+timeout: "1200s"
 
 # Options
 options:
