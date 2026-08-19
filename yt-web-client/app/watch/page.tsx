@@ -20,7 +20,7 @@ import styles from "./watch.module.css";
 
 interface TranscriptMeta {
   id: string;
-  status?: "pending" | "running" | "failed" | "done";
+  status?: "pending" | "running" | "failed" | "done" | "needs_review";
   segmentCount?: number;
   durationSeconds?: number;
 }
@@ -151,6 +151,8 @@ function WatchContent() {
         return "Transcription in progress";
       case "failed":
         return "Transcription failed";
+      case "needs_review":
+        return "Transcription needs review";
       case "done":
         return "Transcript ready";
       default:

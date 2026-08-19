@@ -24,6 +24,10 @@ const adminAuth = getAuth();
 const videoCollectionId = "videos";
 const transcriptsBucketName =
   process.env.TRANSCRIPTS_BUCKET_NAME ?? "atmuri-yt-transcripts";
+// Must match video-processing-service NORMALIZED_TRANSCRIPT_PREFIX.
+const normalizedTranscriptPrefix = (
+  process.env.NORMALIZED_TRANSCRIPT_PREFIX ?? "normalized"
+).replace(/^\/+|\/+$/g, "");
 
 export interface Video {
   id?: string;
@@ -35,7 +39,7 @@ export interface Video {
 }
 
 interface TranscriptDoc {
-  status?: "pending" | "running" | "failed" | "done";
+  status?: "pending" | "running" | "failed" | "done" | "needs_review";
   gcsPath?: string;
   language?: string;
   model?: string;
@@ -269,6 +273,8 @@ function parseGcsUri(uri: string): {bucket: string; path: string} {
 
 /**
  * Ensures the signed object is in the transcripts bucket under this video.
+ * Path prefix comes from NORMALIZED_TRANSCRIPT_PREFIX so it cannot drift
+ * from the video-processing-service write path.
  * @param {{bucket: string, path: string}} parsed Parsed GCS URI.
  * @param {string} videoId Caller-owned video identifier.
  */
@@ -282,7 +288,8 @@ function assertOwnedTranscriptUri(
       "Transcript is not in the configured bucket",
     );
   }
-  const allowedPrefix = `normalized/${videoId}/`;
+  const allowedPrefix =
+    `${normalizedTranscriptPrefix}/${videoId}/`;
   if (!parsed.path.startsWith(allowedPrefix)) {
     throw new functions.https.HttpsError(
       "permission-denied",
