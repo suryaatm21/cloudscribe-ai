@@ -16,17 +16,19 @@ Usage: ./scripts/setup-transcription-infra.sh \
   [--audio-work-bucket <GCS_BUCKET_NAME>] \
   [--jobs-topic <PUBSUB_TOPIC_NAME>] \
   [--ready-topic <PUBSUB_TOPIC_NAME>] \
-  [--raw-transcript-prefix <PREFIX>]
+  [--raw-transcript-prefix <PREFIX>] \
+  [--functions-service-account <FUNCTIONS_RUNTIME_SA_EMAIL>]
 
 Creates the infrastructure required for Sprint 2 transcription:
-  1. Enable Speech-to-Text, Pub/Sub, Cloud Scheduler, Storage, and Run APIs
-  2. Preflight iam.serviceAccounts.actAs on the push identity
+  1. Enable Speech-to-Text, Pub/Sub, Cloud Scheduler, Storage, Run, and IAM APIs
+  2. Preflight iam.serviceAccounts.actAs on the push identity (IAM REST)
   3. Transcripts + audio-work buckets (lifecycle expiry, not retention lock)
-  4. Push subscriptions to /transcribe-audio and /transcript-ready
-  5. DLQ topics AND DLQ subscriptions
+  4. Push subscriptions to /transcribe-audio and /transcript-ready (create or update)
+  5. DLQ topics AND DLQ subscriptions (create or update)
   6. Pub/Sub service-agent IAM required for dead-lettering
-  7. Prefix-filtered GCS notification on the configured raw prefix
+  7. Prefix-filtered GCS notification on the configured raw prefix (idempotent)
   8. Cloud Scheduler job targeting /reconcile-transcripts
+  9. Functions runtime objectViewer + signBlob (TokenCreator on itself)
 
 --push-identity is the Pub/Sub OIDC push / Scheduler identity.
 Runtime Speech/Storage/Firestore/publisher roles go to --service-account,
@@ -36,6 +38,10 @@ SA, while Cloud Run runs as the Compute Engine default SA.
 
 The creator must have iam.serviceAccounts.actAs on --push-identity so
 gcloud can configure OIDC push authentication.
+
+--functions-service-account is the Firebase gen2 Functions identity that
+signs transcript URLs. If omitted, the script describes gettranscripturl,
+then getvideos, in --region.
 
 Example:
   ./scripts/setup-transcription-infra.sh \
@@ -53,6 +59,7 @@ SERVICE_URL=""
 PUSH_IDENTITY=""
 OIDC_AUDIENCE=""
 SERVICE_ACCOUNT=""
+FUNCTIONS_SERVICE_ACCOUNT=""
 CLOUD_RUN_SERVICE="video-processing-service"
 TRANSCRIPTS_BUCKET_NAME="atmuri-yt-transcripts"
 AUDIO_WORK_BUCKET_NAME="atmuri-yt-audio-work"
@@ -88,6 +95,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --service-account)
       SERVICE_ACCOUNT="$2"
+      shift 2
+      ;;
+    --functions-service-account)
+      FUNCTIONS_SERVICE_ACCOUNT="$2"
       shift 2
       ;;
     --cloud-run-service)
@@ -140,6 +151,10 @@ if [[ -z "$RAW_TRANSCRIPT_PREFIX" ]]; then
   exit 1
 fi
 RAW_OBJECT_PREFIX="${RAW_TRANSCRIPT_PREFIX}/"
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required to parse GCS notification listings."
+  exit 1
+fi
 JOBS_DLQ_TOPIC="${JOBS_TOPIC}-dlq"
 READY_DLQ_TOPIC="${READY_TOPIC}-dlq"
 JOBS_SUB="${JOBS_TOPIC}-push"
@@ -203,14 +218,30 @@ function ensure_topic() {
   fi
 }
 
+function subscription_exists() {
+  local subscription="$1"
+  gcloud pubsub subscriptions list --project "$PROJECT_ID" \
+    --format="value(name)" | grep -q "/subscriptions/${subscription}$"
+}
+
 function ensure_push_subscription() {
   local subscription="$1"
   local topic="$2"
   local endpoint="$3"
   local dlq_topic="$4"
-  if gcloud pubsub subscriptions list --project "$PROJECT_ID" \
-    --format="value(name)" | grep -q "/subscriptions/${subscription}$"; then
-    echo "Subscription ${subscription} already exists."
+  if subscription_exists "$subscription"; then
+    echo "Updating push subscription ${subscription} -> ${endpoint}..."
+    gcloud pubsub subscriptions update "$subscription" \
+      --push-endpoint "$endpoint" \
+      --push-auth-service-account "$PUSH_IDENTITY" \
+      --push-auth-token-audience "$OIDC_AUDIENCE" \
+      --ack-deadline "$ACK_DEADLINE" \
+      --min-retry-delay 10 \
+      --max-retry-delay 600 \
+      --message-retention-duration "${LIFECYCLE_DAYS}d" \
+      --dead-letter-topic "$dlq_topic" \
+      --max-delivery-attempts "$DLQ_MAX_DELIVERY" \
+      --project "$PROJECT_ID"
   else
     echo "Creating push subscription ${subscription} -> ${endpoint}..."
     gcloud pubsub subscriptions create "$subscription" \
@@ -231,9 +262,12 @@ function ensure_push_subscription() {
 function ensure_pull_subscription() {
   local subscription="$1"
   local topic="$2"
-  if gcloud pubsub subscriptions list --project "$PROJECT_ID" \
-    --format="value(name)" | grep -q "/subscriptions/${subscription}$"; then
-    echo "Subscription ${subscription} already exists."
+  if subscription_exists "$subscription"; then
+    echo "Updating pull subscription ${subscription}..."
+    gcloud pubsub subscriptions update "$subscription" \
+      --ack-deadline 60 \
+      --message-retention-duration "${LIFECYCLE_DAYS}d" \
+      --project "$PROJECT_ID"
   else
     echo "Creating pull subscription ${subscription}..."
     gcloud pubsub subscriptions create "$subscription" \
@@ -244,18 +278,47 @@ function ensure_pull_subscription() {
   fi
 }
 
+# gcloud iam service-accounts test-iam-permissions does not exist on gcloud 580.
+# iam.serviceAccounts.actAs is the right permission; probe it via IAM REST.
+# Abort only when the probe itself succeeds and the permission is absent.
+# Transport / HTTP failures warn and continue so a broken check cannot block setup.
 function preflight_act_as() {
-  echo "Preflight: iam.serviceAccounts.actAs on ${PUSH_IDENTITY}"
-  local allowed
-  allowed="$(gcloud iam service-accounts test-iam-permissions "$PUSH_IDENTITY" \
-    --project "$PROJECT_ID" \
-    --permissions iam.serviceAccounts.actAs \
-    --format='value(permissions)' 2>/dev/null || true)"
+  echo "Preflight: iam.serviceAccounts.actAs on ${PUSH_IDENTITY} via IAM REST"
+  local encoded token tmp code curl_ec allowed
+  encoded="${PUSH_IDENTITY//@/%40}"
+  tmp="$(mktemp)"
+  if ! token="$(gcloud auth print-access-token)"; then
+    echo "WARNING: could not print an access token for the actAs preflight; continuing."
+    echo "OIDC subscription/scheduler create will fail loudly if actAs is missing."
+    rm -f "$tmp"
+    return 0
+  fi
+  set +e
+  code="$(curl -sS -o "$tmp" -w "%{http_code}" \
+    -X POST \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    "https://iam.googleapis.com/v1/projects/-/serviceAccounts/${encoded}:testIamPermissions" \
+    -d '{"permissions":["iam.serviceAccounts.actAs"]}')"
+  curl_ec=$?
+  set -e
+  if [[ "$curl_ec" -ne 0 || "$code" != "200" ]]; then
+    echo "WARNING: actAs preflight could not be completed (curl_exit=${curl_ec}, http=${code:-none})."
+    if [[ -s "$tmp" ]]; then
+      echo "Response: $(cat "$tmp")"
+    fi
+    echo "Continuing; the real OIDC subscription/scheduler calls will fail loudly if actAs is missing."
+    rm -f "$tmp"
+    return 0
+  fi
+  allowed="$(jq -r '.permissions // [] | join(",")' "$tmp")"
+  rm -f "$tmp"
   if [[ "$allowed" != *"iam.serviceAccounts.actAs"* ]]; then
     echo "ERROR: current credentials lack iam.serviceAccounts.actAs on ${PUSH_IDENTITY}."
     echo "OIDC push subscriptions and Cloud Scheduler require this permission."
     exit 1
   fi
+  echo "actAs preflight passed."
 }
 
 function resolve_runtime_service_account() {
@@ -282,15 +345,47 @@ function resolve_runtime_service_account() {
   fi
 }
 
+function describe_run_service_account() {
+  local name="$1"
+  gcloud run services describe "$name" \
+    --region "$REGION" \
+    --project "$PROJECT_ID" \
+    --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null || true
+}
+
+# getTranscriptUrl is a gen2 callable and signs GCS URLs as the Functions
+# runtime identity, which is not necessarily the video-processor SA.
+function resolve_functions_service_account() {
+  if [[ -n "$FUNCTIONS_SERVICE_ACCOUNT" ]]; then
+    echo "Using Functions service account ${FUNCTIONS_SERVICE_ACCOUNT}."
+    return
+  fi
+  local svc sa
+  for svc in gettranscripturl getvideos generateuploadurl getuploadurl; do
+    sa="$(describe_run_service_account "$svc")"
+    if [[ -n "$sa" ]]; then
+      FUNCTIONS_SERVICE_ACCOUNT="$sa"
+      echo "Functions runtime service account from ${svc}: ${FUNCTIONS_SERVICE_ACCOUNT}."
+      return
+    fi
+  done
+  local project_number
+  project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+  FUNCTIONS_SERVICE_ACCOUNT="${project_number}-compute@developer.gserviceaccount.com"
+  echo "No deployed gen2 functions found; defaulting Functions SA to ${FUNCTIONS_SERVICE_ACCOUNT}."
+}
+
 echo "===> Enabling required APIs..."
 ensure_api_enabled "speech.googleapis.com"
 ensure_api_enabled "pubsub.googleapis.com"
 ensure_api_enabled "cloudscheduler.googleapis.com"
 ensure_api_enabled "storage.googleapis.com"
 ensure_api_enabled "run.googleapis.com"
+ensure_api_enabled "iam.googleapis.com"
 
 preflight_act_as
 resolve_runtime_service_account
+resolve_functions_service_account
 
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 PUBSUB_SA="service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com"
@@ -361,6 +456,24 @@ gcloud storage buckets add-iam-policy-binding "gs://${AUDIO_WORK_BUCKET_NAME}" \
   --member "serviceAccount:${SERVICE_ACCOUNT}" \
   --role "roles/storage.objectAdmin" >/dev/null
 
+# getTranscriptUrl runs as the Functions identity and only needs read + sign.
+# objectViewer is enough to mint a read URL. Grant it even when that identity
+# currently coincides with the Cloud Run runtime SA (objectAdmin), so a later
+# split of the two accounts does not break signing.
+gcloud storage buckets add-iam-policy-binding "gs://${TRANSCRIPTS_BUCKET_NAME}" \
+  --member "serviceAccount:${FUNCTIONS_SERVICE_ACCOUNT}" \
+  --role "roles/storage.objectViewer" >/dev/null
+
+# V4 signed URLs without a key file call iam.serviceAccounts.signBlob on the
+# signing identity. This project already has project-level
+# roles/iam.serviceAccountTokenCreator on the compute SA (which is why
+# generateUploadUrl works today), but the self-binding is the least-privilege
+# grant Google documents and survives later project-IAM tightening.
+gcloud iam service-accounts add-iam-policy-binding "$FUNCTIONS_SERVICE_ACCOUNT" \
+  --member "serviceAccount:${FUNCTIONS_SERVICE_ACCOUNT}" \
+  --role "roles/iam.serviceAccountTokenCreator" \
+  --project "$PROJECT_ID" >/dev/null
+
 gcloud pubsub topics add-iam-policy-binding "$JOBS_TOPIC" \
   --member "serviceAccount:${SERVICE_ACCOUNT}" \
   --role "roles/pubsub.publisher" \
@@ -392,13 +505,30 @@ gcloud pubsub topics add-iam-policy-binding "$READY_TOPIC" \
   --project "$PROJECT_ID" >/dev/null
 
 echo "===> Ensuring prefix-filtered GCS notification..."
-EXISTING_NOTIFICATION="$(
+# gcloud storage buckets notifications list nests fields under
+# "Notification Configuration", so csv projections like (topic,...) yield
+# literal commas. Parse JSON and require topic AND prefix on one record.
+EXISTING_NOTIFICATIONS="$(
   gcloud storage buckets notifications list "gs://${TRANSCRIPTS_BUCKET_NAME}" \
-    --format="csv[no-heading](topic,payload_format,object_name_prefix)" \
-    --project "$PROJECT_ID" 2>/dev/null || true
+    --format=json \
+    --project "$PROJECT_ID"
 )"
-if echo "$EXISTING_NOTIFICATION" | grep -q "${READY_TOPIC}" && \
-   echo "$EXISTING_NOTIFICATION" | grep -Fq "${RAW_OBJECT_PREFIX}"; then
+if jq -e --arg topic "$READY_TOPIC" --arg prefix "$RAW_OBJECT_PREFIX" '
+  def cfg:
+    if type == "object" and has("Notification Configuration")
+    then .["Notification Configuration"]
+    else . end;
+  (if type == "array" then . else [.] end)
+  | map(cfg)
+  | any(
+      ((.topic // "") | tostring) as $t
+      | (
+          ($t | endswith("/topics/" + $topic))
+          or ($t == $topic)
+        )
+        and ((.object_name_prefix // "") == $prefix)
+    )
+' <<<"$EXISTING_NOTIFICATIONS" >/dev/null; then
   echo "GCS notification on ${RAW_OBJECT_PREFIX} -> ${READY_TOPIC} already exists."
 else
   gcloud storage buckets notifications create "gs://${TRANSCRIPTS_BUCKET_NAME}" \
@@ -437,4 +567,5 @@ fi
 echo "===> Transcription infrastructure setup complete."
 echo "Push identity ${PUSH_IDENTITY} can invoke ${CLOUD_RUN_SERVICE}."
 echo "Runtime account ${SERVICE_ACCOUNT} has speech.client and datastore.user."
+echo "Functions account ${FUNCTIONS_SERVICE_ACCOUNT} has objectViewer on transcripts and TokenCreator on itself."
 echo "GCS notification filter is ${RAW_OBJECT_PREFIX}."
