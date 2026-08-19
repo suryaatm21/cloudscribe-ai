@@ -1,4 +1,4 @@
-import { evaluateTranscriptClaim, TranscriptDocument } from "../firestore";
+import { evaluateTranscriptClaim, claimTranscriptJob, TranscriptDocument } from "../firestore";
 
 jest.mock("firebase-admin", () => ({
   credential: { applicationDefault: jest.fn() },
@@ -69,18 +69,32 @@ describe("evaluateTranscriptClaim", () => {
       }),
     ).toEqual({ kind: "already-done" });
   });
+
+  it("treats failed as terminal even when an operation name is present", () => {
+    expect(
+      evaluateTranscriptClaim({
+        ...pending,
+        status: "failed",
+        operationName: "operations/previous",
+      }),
+    ).toEqual({ kind: "terminal-failed" });
+  });
+
+  it("does not re-claim a needs_review transcript", () => {
+    expect(
+      evaluateTranscriptClaim({
+        ...pending,
+        status: "needs_review",
+        error: "Speech RPC may have started",
+      }),
+    ).toEqual({ kind: "needs-review" });
+  });
 });
 
 describe("claimTranscriptJob concurrency", () => {
-  it("second caller cannot start after the first claim is reserved", async () => {
-    const { claimTranscriptJob } = jest.requireActual("../firestore") as {
-      claimTranscriptJob: (
-        videoId: string,
-        transcriptId: string,
-      ) => Promise<{ kind: string; operationName?: string }>;
-    };
-
-    const store: { data?: TranscriptDocument } = {
+  it("only one of two overlapping claims transitions pending to running", async () => {
+    const store: { version: number; data: TranscriptDocument } = {
+      version: 0,
       data: {
         videoId: "video-1",
         status: "pending",
@@ -89,37 +103,78 @@ describe("claimTranscriptJob concurrency", () => {
       },
     };
 
+    let arrivals = 0;
+    let releaseFirstWave: () => void = () => {};
+    const firstWave = new Promise<void>((resolve) => {
+      releaseFirstWave = resolve;
+    });
+    let firstWaveReleased = false;
+
     const { Firestore } = jest.requireMock("firebase-admin/firestore") as {
-      Firestore: new () => {
-        runTransaction: (fn: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
-        collection: () => unknown;
-        doc: () => unknown;
+      Firestore: {
+        prototype: {
+          runTransaction: (
+            fn: (tx: {
+              get: () => Promise<{
+                exists: boolean;
+                id: string;
+                data: () => unknown;
+              }>;
+              set: (
+                _ref: unknown,
+                mutation: Partial<TranscriptDocument>,
+              ) => void;
+            }) => Promise<unknown>,
+          ) => Promise<unknown>;
+        };
       };
     };
 
-    Firestore.prototype.runTransaction = async function runTransaction(
-      fn: (tx: {
-        get: () => Promise<{ exists: boolean; id: string; data: () => unknown }>;
-        set: (_ref: unknown, mutation: Partial<TranscriptDocument>) => void;
-      }) => Promise<unknown>,
-    ) {
-      return fn({
-        get: async () => ({
-          exists: Boolean(store.data),
-          id: "primary",
-          data: () => store.data,
-        }),
-        set: (_ref, mutation) => {
-          store.data = { ...(store.data as TranscriptDocument), ...mutation };
-        },
-      });
+    Firestore.prototype.runTransaction = async function runTransaction(fn) {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const snapVersion = store.version;
+        const snapData = { ...store.data };
+        let pendingWrite: Partial<TranscriptDocument> | undefined;
+        const result = await fn({
+          get: async () => {
+            arrivals += 1;
+            if (!firstWaveReleased && arrivals >= 2) {
+              firstWaveReleased = true;
+              releaseFirstWave();
+            }
+            if (!firstWaveReleased) {
+              await firstWave;
+            }
+            return {
+              exists: true,
+              id: "primary",
+              data: () => ({ ...snapData }),
+            };
+          },
+          set: (_ref, mutation) => {
+            pendingWrite = mutation;
+          },
+        });
+        if (store.version !== snapVersion) {
+          continue;
+        }
+        if (pendingWrite) {
+          store.data = { ...store.data, ...pendingWrite };
+          store.version += 1;
+        }
+        return result;
+      }
+      throw new Error("transaction retries exhausted");
     };
 
-    const first = await claimTranscriptJob("video-1", "primary");
-    const second = await claimTranscriptJob("video-1", "primary");
+    const [first, second] = await Promise.all([
+      claimTranscriptJob("video-1", "primary"),
+      claimTranscriptJob("video-1", "primary"),
+    ]);
 
-    expect(first).toEqual({ kind: "claimed" });
-    expect(second).toEqual({ kind: "claim-in-progress" });
-    expect(store.data?.status).toBe("running");
+    const kinds = [first.kind, second.kind].sort();
+    expect(kinds).toEqual(["claim-in-progress", "claimed"]);
+    expect(store.data.status).toBe("running");
+    expect(store.version).toBe(1);
   });
 });
