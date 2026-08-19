@@ -87,13 +87,42 @@ export function assertTranscriptOutputPrefixes(
   }
 }
 
+/**
+ * Invalid prefixes must not take down transcoding. Fail at import only when
+ * transcription is actually enabled; otherwise log loudly and keep serving.
+ */
+function validateTranscriptPrefixesOrWarn(
+  rawPrefix: string,
+  normalizedPrefix: string,
+  transcriptionEnabled: boolean,
+): void {
+  try {
+    assertTranscriptOutputPrefixes(rawPrefix, normalizedPrefix);
+  } catch (error) {
+    if (transcriptionEnabled) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(
+      `Transcription prefix configuration is invalid (${message}). ` +
+        "Video processing will continue because ENABLE_TRANSCRIPTION is false; " +
+        "enabling transcription will refuse to start until this is fixed.",
+    );
+  }
+}
+
 const rawTranscriptPrefix = normalizePrefix(
   getEnvVar("RAW_TRANSCRIPT_PREFIX") ?? "raw",
 );
 const normalizedTranscriptPrefix = normalizePrefix(
   getEnvVar("NORMALIZED_TRANSCRIPT_PREFIX") ?? "normalized",
 );
-assertTranscriptOutputPrefixes(rawTranscriptPrefix, normalizedTranscriptPrefix);
+const enableTranscription = getBooleanEnvVar("ENABLE_TRANSCRIPTION", false);
+validateTranscriptPrefixesOrWarn(
+  rawTranscriptPrefix,
+  normalizedTranscriptPrefix,
+  enableTranscription,
+);
 
 export const serviceConfig: IServiceConfig = {
   rawVideoBucketName: getEnvVar("RAW_VIDEO_BUCKET_NAME") ?? "atmuri-yt-raw-videos",
@@ -111,7 +140,7 @@ export const serviceConfig: IServiceConfig = {
     getEnvVar("SPEECH_LOCATION") ?? getEnvVar("REGION") ?? "us-central1",
   rawTranscriptPrefix,
   normalizedTranscriptPrefix,
-  enableTranscription: getBooleanEnvVar("ENABLE_TRANSCRIPTION", false),
+  enableTranscription,
   processingMaxAttempts: getNumericEnvVar("PROCESSING_MAX_ATTEMPTS", 3),
   reconcileStaleAfterMs: getNumericEnvVar(
     "RECONCILE_STALE_AFTER_MS",

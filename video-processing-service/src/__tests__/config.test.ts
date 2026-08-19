@@ -73,7 +73,25 @@ describe("serviceConfig load-time validation", () => {
     expect(serviceConfig.enableTranscription).toBe(false);
   });
 
-  it("fails fast when configured prefixes overlap", () => {
+  it("does not crash the process when prefixes overlap and transcription is off", () => {
+    process.env.RAW_TRANSCRIPT_PREFIX = "raw";
+    process.env.NORMALIZED_TRANSCRIPT_PREFIX = "raw/nested";
+    delete process.env.ENABLE_TRANSCRIPTION;
+    const consoleError = jest.spyOn(console, "error").mockImplementation();
+    jest.resetModules();
+    expect(() => jest.requireActual("../config")).not.toThrow();
+    const { serviceConfig } = jest.requireActual("../config") as {
+      serviceConfig: { enableTranscription: boolean };
+    };
+    expect(serviceConfig.enableTranscription).toBe(false);
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringMatching(/overlap/),
+    );
+    consoleError.mockRestore();
+  });
+
+  it("fails fast at import when prefixes overlap and transcription is enabled", () => {
+    process.env.ENABLE_TRANSCRIPTION = "true";
     process.env.RAW_TRANSCRIPT_PREFIX = "raw";
     process.env.NORMALIZED_TRANSCRIPT_PREFIX = "raw/nested";
     jest.resetModules();

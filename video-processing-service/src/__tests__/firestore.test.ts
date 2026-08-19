@@ -1,4 +1,10 @@
-import { evaluateTranscriptClaim, claimTranscriptJob, TranscriptDocument } from "../firestore";
+import {
+  evaluateTranscriptClaim,
+  claimTranscriptJob,
+  buildTranscriptStatusUpdate,
+  shouldApplyTranscriptStatusTransition,
+  TranscriptDocument,
+} from "../firestore";
 
 jest.mock("firebase-admin", () => ({
   credential: { applicationDefault: jest.fn() },
@@ -8,19 +14,32 @@ jest.mock("firebase-admin/app", () => ({
   initializeApp: jest.fn(),
 }));
 
-jest.mock("firebase-admin/firestore", () => ({
-  Firestore: class {
-    collection() {
-      return this;
-    }
-    doc() {
-      return this;
-    }
-    runTransaction(fn: (tx: unknown) => unknown) {
-      return fn({});
-    }
+jest.mock("firebase-admin/firestore", () => {
+  const deleteSentinel = { __fieldValueDelete: true };
+  return {
+    Firestore: class {
+      collection() {
+        return this;
+      }
+      doc() {
+        return this;
+      }
+      runTransaction(fn: (tx: unknown) => unknown) {
+        return fn({});
+      }
+    },
+    Timestamp: { now: () => ({ seconds: 1, nanoseconds: 0 }) },
+    FieldValue: { delete: () => deleteSentinel },
+  };
+});
+
+jest.mock("../logger", () => ({
+  logger: {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
   },
-  Timestamp: { now: () => ({ seconds: 1, nanoseconds: 0 }) },
 }));
 
 describe("evaluateTranscriptClaim", () => {
@@ -176,5 +195,39 @@ describe("claimTranscriptJob concurrency", () => {
     expect(kinds).toEqual(["claim-in-progress", "claimed"]);
     expect(store.data.status).toBe("running");
     expect(store.version).toBe(1);
+  });
+});
+
+describe("transcript status updates", () => {
+  const { FieldValue } = jest.requireMock("firebase-admin/firestore") as {
+    FieldValue: { delete: () => unknown };
+  };
+
+  it("clears a stale error when recovering to done", () => {
+    const payload = buildTranscriptStatusUpdate("done", {
+      gcsPath: "gs://atmuri-yt-transcripts/normalized/video-1/primary.json",
+    });
+    expect(payload.status).toBe("done");
+    expect(payload.error).toEqual(FieldValue.delete());
+    expect(payload.gcsPath).toBe(
+      "gs://atmuri-yt-transcripts/normalized/video-1/primary.json",
+    );
+  });
+
+  it("keeps an explicit error on failed", () => {
+    const payload = buildTranscriptStatusUpdate("failed", { error: "boom" });
+    expect(payload.error).toBe("boom");
+  });
+
+  it("refuses to regress a done transcript and allows recovery to done", () => {
+    expect(shouldApplyTranscriptStatusTransition("done", "failed")).toBe(false);
+    expect(shouldApplyTranscriptStatusTransition("done", "running")).toBe(false);
+    expect(shouldApplyTranscriptStatusTransition("done", "done")).toBe(true);
+    expect(shouldApplyTranscriptStatusTransition("needs_review", "done")).toBe(
+      true,
+    );
+    expect(shouldApplyTranscriptStatusTransition("running", "failed")).toBe(
+      true,
+    );
   });
 });

@@ -1,6 +1,7 @@
 import { credential } from "firebase-admin";
 import { initializeApp } from "firebase-admin/app";
-import { Firestore, Timestamp } from "firebase-admin/firestore";
+import { Firestore, FieldValue, Timestamp } from "firebase-admin/firestore";
+import { logger } from "./logger";
 
 initializeApp({ credential: credential.applicationDefault() });
 
@@ -219,20 +220,59 @@ export async function updateTranscript(
   await transcriptRef(videoId, transcriptId).set(mutation, { merge: true });
 }
 
-export async function updateTranscriptStatus(
-  videoId: string,
-  transcriptId: string,
+/**
+ * Last-write-wins is kept for non-done transitions. The only race we guard
+ * is regressing a completed transcript (notification vs sweeper vs a late
+ * failure write). A full status state machine would be more invasive than
+ * this slice needs.
+ */
+export function shouldApplyTranscriptStatusTransition(
+  current: TranscriptStatus | undefined,
+  next: TranscriptStatus,
+): boolean {
+  return !(current === "done" && next !== "done");
+}
+
+export function buildTranscriptStatusUpdate(
   status: TranscriptStatus,
   overrides?: Partial<TranscriptDocument>,
-) {
-  const updatePayload: Partial<TranscriptDocument> = {
+): Record<string, unknown> {
+  const updatePayload: Record<string, unknown> = {
     status,
     ...overrides,
   };
   if (status === "done" || status === "failed") {
     updatePayload.completedAt = Timestamp.now();
   }
-  await updateTranscript(videoId, transcriptId, updatePayload);
+  if (status === "done" && overrides?.error === undefined) {
+    updatePayload.error = FieldValue.delete();
+  }
+  return updatePayload;
+}
+
+export async function updateTranscriptStatus(
+  videoId: string,
+  transcriptId: string,
+  status: TranscriptStatus,
+  overrides?: Partial<TranscriptDocument>,
+) {
+  const ref = transcriptRef(videoId, transcriptId);
+  await firestore.runTransaction(async (tx) => {
+    const snapshot = await tx.get(ref);
+    const current = snapshot.exists
+      ? (snapshot.data() as TranscriptDocument).status
+      : undefined;
+    if (!shouldApplyTranscriptStatusTransition(current, status)) {
+      logger.warn("Refusing to regress transcript status from done", {
+        component: "firestore",
+        videoId,
+        transcriptId,
+        attemptedStatus: status,
+      });
+      return;
+    }
+    tx.set(ref, buildTranscriptStatusUpdate(status, overrides), { merge: true });
+  });
 }
 
 /**
