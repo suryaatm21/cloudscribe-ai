@@ -37,10 +37,12 @@ steps:
       - "--platform=managed"
       - "--allow-unauthenticated"
 
-# Build timeout (15 minutes for Next.js build)
-timeout: "900s"
+# Default e2-standard-2 (2 vCPU) is slower than the previous N1_HIGHCPU_8
+# (measured 6m15s). Allow 30 minutes so a Next.js production build cannot
+# fail on time. Default machine also qualifies for 2,500 free e2-standard-2
+# build-minutes/month.
+timeout: "1800s"
 
-# Options
+# CLOUD_LOGGING_ONLY is required when there is no dedicated logs bucket.
 options:
-  machineType: "N1_HIGHCPU_8" # Use a powerful build machine for faster Next.js builds
   logging: CLOUD_LOGGING_ONLY

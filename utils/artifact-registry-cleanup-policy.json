@@ -1,0 +1,32 @@
+[
+  {
+    "name": "keep-latest-tag",
+    "action": {"type": "Keep"},
+    "condition": {
+      "tagState": "tagged",
+      "tagPrefixes": ["latest"]
+    }
+  },
+  {
+    "name": "keep-two-recent-versions",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {
+      "keepCount": 2
+    }
+  },
+  {
+    "name": "delete-untagged-manifests",
+    "action": {"type": "Delete"},
+    "condition": {
+      "tagState": "untagged"
+    }
+  },
+  {
+    "name": "delete-tags-older-than-14d",
+    "action": {"type": "Delete"},
+    "condition": {
+      "tagState": "tagged",
+      "olderThan": "14d"
+    }
+  }
+]

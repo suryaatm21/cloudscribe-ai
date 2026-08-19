@@ -1,11 +1,17 @@
+# Disabled as a standing deploy path. Cloud Build already builds, pushes, and
+# deploys video-processing-service on push to main via
+# video-processing-service/cloudbuild.yaml. Leaving this workflow on `push`
+# would duplicate a ~600 MB image into Artifact Registry on every change once
+# GCP_SA_KEY is configured.
+#
+# Historical runs never got that far: the workflow requires secrets.GCP_SA_KEY,
+# which is not set on this repo, so google-github-actions/auth fails in ~10s.
+# Keep the job for a manual emergency deploy; do not re-enable `push` unless
+# Cloud Build is removed.
 name: Deploy Video Processing Service
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'video-processing-service/**'
+  workflow_dispatch:
 
 jobs:
   deploy:
