@@ -25,7 +25,19 @@ function getJobId(req: Request): string | undefined {
  * @throws {Error} If the message is invalid or missing required fields.
  */
 export function decodePubSubMessage(req: Request): PubSubMessage {
-  // Ensure body.message.data exists (Pub/Sub format)
+  const data = decodeJsonPayload<PubSubMessage>(req);
+  if (!data.name) {
+    throw new Error("Missing filename in payload");
+  }
+  return data;
+}
+
+/**
+ * Decodes the JSON body of a Pub/Sub push message.
+ * Restored from b5d16e5, with runtime guards so `null` / non-objects fail
+ * here instead of at a later destructure in an HTTP handler.
+ */
+export function decodeJsonPayload<T>(req: Request): T {
   if (!req.body?.message?.data) {
     throw new Error("No message data found in request");
   }
@@ -33,22 +45,27 @@ export function decodePubSubMessage(req: Request): PubSubMessage {
   const messageId = getJobId(req) ?? "unknown";
   const message = Buffer.from(req.body.message.data, "base64").toString("utf8");
 
-  let data: PubSubMessage;
+  let data: unknown;
   try {
     data = JSON.parse(message);
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("Decoded payload is not an object");
+    }
   } catch (parseError) {
+    if (
+      parseError instanceof Error &&
+      parseError.message === "Decoded payload is not an object"
+    ) {
+      throw parseError;
+    }
     throw new Error("Invalid JSON in message");
-  }
-
-  if (!data.name) {
-    throw new Error("Missing filename in payload");
   }
 
   if (serviceConfig.environment !== "production") {
     logger.debug("Decoded Pub/Sub message", { jobId: messageId, payload: data });
   }
 
-  return data;
+  return data as T;
 }
 
 /**
