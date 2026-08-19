@@ -1,5 +1,10 @@
 # Cloud Build configuration for video-processing-service
 # Triggered automatically when you push to GitHub
+#
+# Manual `gcloud builds submit` must pass
+# `--substitutions=COMMIT_SHA="$(git rev-parse HEAD)"`. COMMIT_SHA is only
+# auto-populated for trigger builds; without it the image tag is an invalid
+# empty `...:` suffix.
 
 steps:
   # Step 0: Install dependencies, build, and run tests before building the Docker image
@@ -37,30 +42,29 @@ steps:
       - "us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:latest"
 
   # Step 3: Deploy to Cloud Run
+  # Substitutions are expanded by Cloud Build in args, not exported into the step's
+  # shell, so bash defaults like ${COMMIT_SHA:-unknown} resolve to "unknown" and
+  # deploy a tag that was never pushed. Reference $COMMIT_SHA directly instead.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    entrypoint: "bash"
+    entrypoint: gcloud
     args:
-      - "-c"
-      - |
-        gcloud run deploy "video-processing-service" \
-          --image="us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:${COMMIT_SHA:-unknown}" \
-          --region="us-central1" \
-          --platform="managed" \
-          --timeout=3600 \
-          --memory=2Gi \
-          --cpu=1 \
-          --min-instances=0 \
-          --max-instances=1 \
-          --ingress="internal" \
-          --set-env-vars="PROCESSING_MAX_ATTEMPTS=3" \
-          --labels="commit=${COMMIT_SHA:-unknown}"
+      - "run"
+      - "deploy"
+      - "video-processing-service"
+      - "--image=us-central1-docker.pkg.dev/$PROJECT_ID/video-processing-service/video-processing-service:$COMMIT_SHA"
+      - "--region=us-central1"
+      - "--platform=managed"
+      - "--timeout=3600"
+      - "--memory=2Gi"
+      - "--cpu=1"
+      - "--min-instances=0"
+      - "--max-instances=1"
+      - "--ingress=internal"
+      - "--update-env-vars=PROCESSING_MAX_ATTEMPTS=3"
+      - "--labels=commit=$COMMIT_SHA"
 
 # Build timeout (10 minutes)
 timeout: "600s"
-
-# Substitutions for environment variables
-substitutions:
-  _REGION: "us-central1"
 
 # Options
 options:

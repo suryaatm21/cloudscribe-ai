@@ -75,7 +75,7 @@ This document captures all required environment variables, service accounts, and
 ## Secret Management
 
 - Local development uses `.env` files located beside each service; production values are stored in Secret Manager and referenced by Cloud Run/Cloud Functions.
-- Never commit real secrets. Only `.env.example` files are tracked in Git.
+- Never commit real secrets. `.env.example` files are tracked as templates. `yt-web-client/.env.production` is also tracked on purpose: it holds only `NEXT_PUBLIC_*` Firebase web config, which is public-by-design and must be present at Docker build time so `next build` can inline it. Real secrets stay out of Git.
 
 ## Validation Checklist
 
