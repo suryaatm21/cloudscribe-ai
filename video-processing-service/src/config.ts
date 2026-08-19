@@ -51,6 +51,50 @@ function normalizePrefix(value: string): string {
   return value.replace(/^\/+|\/+$/g, "");
 }
 
+/**
+ * Speech writes under `{raw}/...` and a GCS notification is filtered on that
+ * prefix. Normalized output must not match that filter, or `/transcript-ready`
+ * would re-trigger itself in a billed loop. Path-prefix overlap (`raw` vs
+ * `raw/extra`) is as dangerous as equality.
+ */
+export function assertTranscriptOutputPrefixes(
+  rawPrefix: string,
+  normalizedPrefix: string,
+): void {
+  if (!rawPrefix || !normalizedPrefix) {
+    throw new Error(
+      "RAW_TRANSCRIPT_PREFIX and NORMALIZED_TRANSCRIPT_PREFIX must be non-empty",
+    );
+  }
+  if (rawPrefix.includes("\0") || normalizedPrefix.includes("\0")) {
+    throw new Error("Transcript prefixes must not contain null bytes");
+  }
+  if (rawPrefix === normalizedPrefix) {
+    throw new Error(
+      "RAW_TRANSCRIPT_PREFIX and NORMALIZED_TRANSCRIPT_PREFIX must be distinct",
+    );
+  }
+  const rawPath = `${rawPrefix}/`;
+  const normalizedPath = `${normalizedPrefix}/`;
+  if (
+    rawPath.startsWith(normalizedPath) ||
+    normalizedPath.startsWith(rawPath)
+  ) {
+    throw new Error(
+      `Transcript prefixes overlap (raw=${rawPrefix}, normalized=${normalizedPrefix}); ` +
+        "this would create a billed notification feedback loop",
+    );
+  }
+}
+
+const rawTranscriptPrefix = normalizePrefix(
+  getEnvVar("RAW_TRANSCRIPT_PREFIX") ?? "raw",
+);
+const normalizedTranscriptPrefix = normalizePrefix(
+  getEnvVar("NORMALIZED_TRANSCRIPT_PREFIX") ?? "normalized",
+);
+assertTranscriptOutputPrefixes(rawTranscriptPrefix, normalizedTranscriptPrefix);
+
 export const serviceConfig: IServiceConfig = {
   rawVideoBucketName: getEnvVar("RAW_VIDEO_BUCKET_NAME") ?? "atmuri-yt-raw-videos",
   processedVideoBucketName:
@@ -65,11 +109,9 @@ export const serviceConfig: IServiceConfig = {
   speechToTextLanguage: getEnvVar("SPEECH_TO_TEXT_LANGUAGE") ?? "en-US",
   speechLocation:
     getEnvVar("SPEECH_LOCATION") ?? getEnvVar("REGION") ?? "us-central1",
-  rawTranscriptPrefix: normalizePrefix(getEnvVar("RAW_TRANSCRIPT_PREFIX") ?? "raw"),
-  normalizedTranscriptPrefix: normalizePrefix(
-    getEnvVar("NORMALIZED_TRANSCRIPT_PREFIX") ?? "normalized",
-  ),
-  enableTranscription: getBooleanEnvVar("ENABLE_TRANSCRIPTION", true),
+  rawTranscriptPrefix,
+  normalizedTranscriptPrefix,
+  enableTranscription: getBooleanEnvVar("ENABLE_TRANSCRIPTION", false),
   processingMaxAttempts: getNumericEnvVar("PROCESSING_MAX_ATTEMPTS", 3),
   reconcileStaleAfterMs: getNumericEnvVar(
     "RECONCILE_STALE_AFTER_MS",

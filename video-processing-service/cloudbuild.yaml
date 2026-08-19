@@ -60,7 +60,7 @@ steps:
       - "--min-instances=0"
       - "--max-instances=1"
       - "--ingress=internal"
-      - "--update-env-vars=PROCESSING_MAX_ATTEMPTS=3"
+      - "--update-env-vars=PROCESSING_MAX_ATTEMPTS=3,ENABLE_TRANSCRIPTION=false,SERVICE_VERSION=$COMMIT_SHA"
       - "--labels=commit=$COMMIT_SHA"
 
 # Build timeout (10 minutes)
@@ -68,5 +68,5 @@ timeout: "600s"
 
 # Options
 options:
-  machineType: "N1_HIGHCPU_8" # Use a powerful build machine
+  machineType: "E2_STANDARD_2"
   logging: CLOUD_LOGGING_ONLY
