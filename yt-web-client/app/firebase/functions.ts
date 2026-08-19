@@ -3,6 +3,7 @@ import { functions } from "./firebase";
 
 const generateUploadUrl = httpsCallable(functions, "generateUploadUrl");
 const getVideosFunction = httpsCallable(functions, "getVideos");
+const getTranscriptUrlFunction = httpsCallable(functions, "getTranscriptUrl");
 
 export interface Video {
   id?: string;
@@ -47,4 +48,27 @@ export async function uploadVideo(file: File) {
     fileName: response.data.fileName,
     message: "Video uploaded successfully! Processing will begin shortly.",
   };
+}
+
+export interface TranscriptResponse {
+  url: string;
+  transcriptId: string;
+  segmentCount: number;
+  durationSeconds: number;
+  language?: string;
+  model?: string;
+}
+
+export async function getTranscriptUrl(
+  videoId: string,
+  transcriptId = "primary",
+): Promise<TranscriptResponse> {
+  const response: any = await getTranscriptUrlFunction({
+    videoId,
+    transcriptId,
+  });
+  if (!response?.data?.url) {
+    throw new Error("Transcript URL not available");
+  }
+  return response.data as TranscriptResponse;
 }
