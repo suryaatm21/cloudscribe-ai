@@ -14,6 +14,7 @@ This document captures all required environment variables, service accounts, and
 | `PROCESSED_VIDEO_BUCKET_NAME` | ✅ | `atmuri-yt-processed-videos` | Bucket serving processed media |
 | `PROCESSING_MAX_ATTEMPTS` | ✅ | `3` | Number of retries before marking a video as failed |
 | `SERVICE_VERSION` | ➖ | `dev` | Overrides version reported by `/health` |
+| `ENABLE_TRANSCRIPTION` | ➖ | `false` | When `true`, `/process-video` queues Speech jobs and the transcribe endpoints run. Cloud Build deploys this from `_ENABLE_TRANSCRIPTION` (still `false` until infra is provisioned). |
 | `NODE_ENV` | ➖ | `development` | Used for logging context |
 | `GOOGLE_APPLICATION_CREDENTIALS` | ➖ | – | Path to service account JSON when running locally |
 | `SMOKE_ID_TOKEN` | ➖ | – | Firebase ID token for smoke test authentication |
@@ -58,6 +59,14 @@ This document captures all required environment variables, service accounts, and
 **Service Accounts**
 
 - Firebase admin SDK default service account requires `roles/storage.objectCreator` on the raw bucket to issue signed URLs.
+
+**Transcription signing IAM**
+
+`scripts/setup-transcription-infra.sh` grants `roles/storage.objectViewer` on the transcripts bucket to the Firebase Functions runtime identity so `getTranscriptUrl` can mint V4 signed URLs.
+
+That binding is pinned to the identity resolved on that run. It does **not** automatically follow a later identity split: if `getTranscriptUrl` is redeployed with a different service account, rerun the script (or pass `--functions-service-account <new-email>`) so the new identity receives `objectViewer` and `iam.serviceAccountTokenCreator`. The previous identity keeps its binding until it is removed by hand.
+
+If the script cannot describe the gen2 Functions services, pass `--functions-service-account` explicitly. It will not guess the Compute Engine default SA.
 
 ## Web Client (`yt-web-client`)
 

@@ -4,6 +4,7 @@ import {
   buildTranscriptStatusUpdate,
   shouldApplyTranscriptStatusTransition,
   TranscriptDocument,
+  updateTranscriptStatus,
 } from "../firestore";
 
 jest.mock("firebase-admin", () => ({
@@ -229,5 +230,65 @@ describe("transcript status updates", () => {
     expect(shouldApplyTranscriptStatusTransition("running", "failed")).toBe(
       true,
     );
+  });
+});
+
+describe("updateTranscriptStatus", () => {
+  const setFn = jest.fn();
+  let currentStatus: TranscriptDocument["status"] | undefined;
+  let previousRunTransaction: (
+    fn: (tx: unknown) => unknown,
+  ) => unknown | Promise<unknown>;
+
+  beforeEach(() => {
+    setFn.mockClear();
+    const { Firestore } = jest.requireMock("firebase-admin/firestore") as {
+      Firestore: {
+        prototype: {
+          runTransaction: (fn: (tx: unknown) => unknown) => unknown;
+        };
+      };
+    };
+    previousRunTransaction = Firestore.prototype.runTransaction;
+    Firestore.prototype.runTransaction = async function runTransaction(fn) {
+      return fn({
+        get: async () => ({
+          exists: currentStatus !== undefined,
+          data: () => ({ status: currentStatus, videoId: "video-1" }),
+        }),
+        set: setFn,
+      });
+    };
+  });
+
+  afterEach(() => {
+    const { Firestore } = jest.requireMock("firebase-admin/firestore") as {
+      Firestore: {
+        prototype: {
+          runTransaction: (fn: (tx: unknown) => unknown) => unknown;
+        };
+      };
+    };
+    Firestore.prototype.runTransaction = previousRunTransaction;
+  });
+
+  it("returns false and does not write when refusing to regress done", async () => {
+    currentStatus = "done";
+    await expect(
+      updateTranscriptStatus("video-1", "primary", "failed", {
+        error: "late failure",
+      }),
+    ).resolves.toBe(false);
+    expect(setFn).not.toHaveBeenCalled();
+  });
+
+  it("returns true and writes when the transition is applied", async () => {
+    currentStatus = "running";
+    await expect(
+      updateTranscriptStatus("video-1", "primary", "failed", {
+        error: "boom",
+      }),
+    ).resolves.toBe(true);
+    expect(setFn).toHaveBeenCalled();
   });
 });

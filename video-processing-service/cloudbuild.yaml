@@ -69,10 +69,12 @@ steps:
       - "--labels=commit=$COMMIT_SHA"
 
 # Default stays off until transcription infra is provisioned. After that, set
-# the trigger substitution `_ENABLE_TRANSCRIPTION=true` so later deploys keep
-# the flag on:
-#   gcloud builds triggers update video-processing-service \
-#     --substitutions=_ENABLE_TRANSCRIPTION=true
+# the GitHub trigger substitution `_ENABLE_TRANSCRIPTION=true` so later deploys
+# keep the flag on. Confirmed trigger: name `video-processing-service`,
+# region `global` (`gcloud builds triggers list --project=yt-clone-385f4`):
+#   gcloud builds triggers update github video-processing-service \
+#     --region=global --project=yt-clone-385f4 \
+#     --update-substitutions=_ENABLE_TRANSCRIPTION=true
 substitutions:
   _ENABLE_TRANSCRIPTION: "false"
 

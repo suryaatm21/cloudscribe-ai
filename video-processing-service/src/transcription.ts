@@ -92,6 +92,27 @@ export class SpeechJobStartError extends Error {
 }
 
 /**
+ * Malformed Speech JSON / schema will never become valid on retry.
+ * Callers must ack Pub/Sub (200) and mark the transcript failed.
+ */
+export class PermanentTranscriptParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PermanentTranscriptParseError";
+  }
+}
+
+export function isPermanentTranscriptParseError(
+  error: unknown,
+): error is PermanentTranscriptParseError {
+  return error instanceof PermanentTranscriptParseError;
+}
+
+function throwPermanentParse(message: string): never {
+  throw new PermanentTranscriptParseError(message);
+}
+
+/**
  * gRPC codes that mean the server rejected the request before accepting a
  * batch job. Codes like DEADLINE_EXCEEDED (4) and UNAVAILABLE (14) are
  * omitted: the RPC may already have been accepted.
@@ -411,7 +432,7 @@ export function buildTranscriptPayload(
     const alternative = firstAlternative(result, index);
     const text = stringField(alternative, "transcript")?.trim() ?? "";
     if (!text) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 result JSON: results[${index}] is missing transcript text`,
       );
     }
@@ -426,7 +447,7 @@ export function buildTranscriptPayload(
       ) ??
       durationToSeconds(readField(result, "resultEndOffset", "result_end_offset"));
     if (startTime === undefined || endTime === undefined) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 result JSON: results[${index}] is missing timing`,
       );
     }
@@ -442,7 +463,7 @@ export function buildTranscriptPayload(
   });
 
   if (segments.length === 0) {
-    throw new Error(
+    throwPermanentParse(
       "Speech v2 result contained no usable segments; refusing to persist an empty transcript",
     );
   }
@@ -476,7 +497,7 @@ export async function downloadSpeechResultJson(
   try {
     parsed = JSON.parse(contents.toString("utf8"));
   } catch {
-    throw new Error(
+    throwPermanentParse(
       `Speech v2 result at gs://${bucketName}/${objectName} is not valid JSON`,
     );
   }
@@ -560,21 +581,21 @@ function outputUriFromFileResult(file: unknown): string | undefined {
 
 function extractSpeechV2Results(parsed: unknown): Record<string, unknown>[] {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(
+    throwPermanentParse(
       `Unexpected Speech v2 result JSON: expected an object, got ${describeType(parsed)}`,
     );
   }
 
   const results = readField(parsed, "results");
   if (!Array.isArray(results)) {
-    throw new Error(
+    throwPermanentParse(
       "Unexpected Speech v2 result JSON: missing results[] (BatchRecognizeResults)",
     );
   }
 
   return results.map((result, index) => {
     if (result === null || typeof result !== "object" || Array.isArray(result)) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 result JSON: results[${index}] is not an object`,
       );
     }
@@ -589,12 +610,12 @@ function firstAlternative(
   const alternatives = asArray(readField(result, "alternatives"));
   const first = alternatives[0];
   if (first === undefined) {
-    throw new Error(
+    throwPermanentParse(
       `Unexpected Speech v2 result JSON: results[${index}] has no alternatives`,
     );
   }
   if (first === null || typeof first !== "object" || Array.isArray(first)) {
-    throw new Error(
+    throwPermanentParse(
       `Unexpected Speech v2 result JSON: results[${index}].alternatives[0] is not an object`,
     );
   }
@@ -614,27 +635,29 @@ export function durationToSeconds(value: unknown): number | undefined {
   if (typeof value === "string") {
     const match = value.trim().match(/^(-?\d+(?:\.\d+)?)s$/);
     if (!match) {
-      throw new Error(`Unexpected Speech v2 duration string: ${value}`);
+      throwPermanentParse(`Unexpected Speech v2 duration string: ${value}`);
     }
     return Number(match[1]);
   }
   if (typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
     if (!("seconds" in record) && !("nanos" in record)) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 duration object: ${JSON.stringify(value)}`,
       );
     }
     const seconds = Number(record.seconds ?? 0);
     const nanos = Number(record.nanos ?? 0);
     if (!Number.isFinite(seconds) || !Number.isFinite(nanos)) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 duration object: ${JSON.stringify(value)}`,
       );
     }
     return seconds + nanos / 1_000_000_000;
   }
-  throw new Error(`Unexpected Speech v2 duration value: ${describeType(value)}`);
+  throwPermanentParse(
+    `Unexpected Speech v2 duration value: ${describeType(value)}`,
+  );
 }
 
 function readField(

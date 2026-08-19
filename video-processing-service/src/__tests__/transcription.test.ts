@@ -50,10 +50,12 @@ jest.mock("../logger", () => ({
 import {
   buildTranscriptPayload,
   classifySpeechStartFailure,
+  downloadSpeechResultJson,
   durationToSeconds,
   inspectBatchRecognizeOperation,
   inspectDecodedBatchRecognizeOperation,
   parseRawTranscriptObjectName,
+  PermanentTranscriptParseError,
   SpeechJobStartError,
   startTranscriptionJob,
   uploadTranscriptPayload,
@@ -219,7 +221,7 @@ describe("transcription module", () => {
 
   it("fails loudly on unexpected Speech v2 JSON", () => {
     expect(() => buildTranscriptPayload("video-9", null)).toThrow(
-      /expected an object/,
+      PermanentTranscriptParseError,
     );
     expect(() => buildTranscriptPayload("video-9", { metadata: {} })).toThrow(
       /missing results\[\]/,
@@ -325,7 +327,15 @@ describe("transcription module", () => {
   });
 
   it("refuses empty duration objects instead of coercing them to 0", () => {
+    expect(() => durationToSeconds({})).toThrow(PermanentTranscriptParseError);
     expect(() => durationToSeconds({})).toThrow(/duration object/);
+  });
+
+  it("classifies invalid Speech JSON as a permanent parse error", async () => {
+    mockDownload.mockResolvedValue([Buffer.from("not-json")]);
+    await expect(downloadSpeechResultJson("b", "o.json")).rejects.toBeInstanceOf(
+      PermanentTranscriptParseError,
+    );
   });
 
   it("reads BatchRecognizeResponse from a real google-gax Operation.result", async () => {

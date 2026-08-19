@@ -255,9 +255,9 @@ export async function updateTranscriptStatus(
   transcriptId: string,
   status: TranscriptStatus,
   overrides?: Partial<TranscriptDocument>,
-) {
+): Promise<boolean> {
   const ref = transcriptRef(videoId, transcriptId);
-  await firestore.runTransaction(async (tx) => {
+  return firestore.runTransaction(async (tx) => {
     const snapshot = await tx.get(ref);
     const current = snapshot.exists
       ? (snapshot.data() as TranscriptDocument).status
@@ -269,9 +269,10 @@ export async function updateTranscriptStatus(
         transcriptId,
         attemptedStatus: status,
       });
-      return;
+      return false;
     }
     tx.set(ref, buildTranscriptStatusUpdate(status, overrides), { merge: true });
+    return true;
   });
 }
 

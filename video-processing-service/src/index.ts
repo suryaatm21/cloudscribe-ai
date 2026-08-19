@@ -35,6 +35,7 @@ import {
   GcsObjectNotification,
   inspectBatchRecognizeOperation,
   isConfiguredTranscriptsBucket,
+  isPermanentTranscriptParseError,
   parseGsUri,
   parseRawTranscriptObjectName,
   startTranscriptionJob,
@@ -46,6 +47,10 @@ export const app = express();
 app.use(express.json());
 
 setupDirectories();
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
 
 /**
  * Health endpoint to verify service readiness and dependency availability.
@@ -168,12 +173,16 @@ app.post(
     }
 
     const { videoId, transcriptId, audioGcsUri } = payload;
-    if (!videoId || !transcriptId || !audioGcsUri) {
-      logger.error("Transcription job payload is missing required fields", {
+    if (
+      !isNonEmptyString(videoId) ||
+      !isNonEmptyString(transcriptId) ||
+      !isNonEmptyString(audioGcsUri)
+    ) {
+      logger.error("Transcription job payload has invalid required fields", {
         component: "transcription",
-        videoId,
-        transcriptId,
-        hasAudioGcsUri: Boolean(audioGcsUri),
+        videoIdType: typeof videoId,
+        transcriptIdType: typeof transcriptId,
+        audioGcsUriType: typeof audioGcsUri,
       });
       sendAcknowledgmentResponse(res);
       return;
@@ -316,11 +325,11 @@ app.post(
 
     const objectName = notification.name;
     const bucketName = notification.bucket;
-    if (!objectName || !bucketName) {
-      logger.error("Transcript-ready payload is missing bucket or object name", {
+    if (!isNonEmptyString(objectName) || !isNonEmptyString(bucketName)) {
+      logger.error("Transcript-ready payload has invalid bucket or object name", {
         component: "transcription",
-        hasObjectName: Boolean(objectName),
-        hasBucketName: Boolean(bucketName),
+        objectNameType: typeof objectName,
+        bucketNameType: typeof bucketName,
       });
       sendAcknowledgmentResponse(res);
       return;
@@ -397,6 +406,36 @@ app.post(
       sendSuccessResponse(res, "Transcript normalized");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (isPermanentTranscriptParseError(error)) {
+        logger.error(
+          "Permanent Speech result parse/schema failure; acking without retry",
+          {
+            component: "transcription",
+            videoId,
+            transcriptId,
+            error: message,
+          },
+        );
+        try {
+          await updateTranscriptStatus(videoId, transcriptId, "failed", {
+            error: message,
+          });
+        } catch (statusError) {
+          logger.error("Failed to persist permanent parse failure", {
+            component: "transcription",
+            videoId,
+            transcriptId,
+            error:
+              statusError instanceof Error
+                ? statusError.message
+                : statusError,
+          });
+          res.status(500).send("Transcript finalization failed");
+          return;
+        }
+        sendAcknowledgmentResponse(res);
+        return;
+      }
       logger.error("Failed to finalize transcript", {
         component: "transcription",
         videoId,
@@ -445,11 +484,18 @@ app.post(
               needsReview += 1;
               continue;
             }
-            await updateTranscriptStatus(videoId, transcriptId, "needs_review", {
-              error:
-                "Claimed without a persisted Speech operationName; RPC may have started",
-            });
-            needsReview += 1;
+            const applied = await updateTranscriptStatus(
+              videoId,
+              transcriptId,
+              "needs_review",
+              {
+                error:
+                  "Claimed without a persisted Speech operationName; RPC may have started",
+              },
+            );
+            if (applied) {
+              needsReview += 1;
+            }
             continue;
           }
 
@@ -462,18 +508,32 @@ app.post(
           }
 
           if (inspection.error) {
-            await updateTranscriptStatus(videoId, transcriptId, "failed", {
-              error: inspection.error,
-            });
-            failed += 1;
+            const applied = await updateTranscriptStatus(
+              videoId,
+              transcriptId,
+              "failed",
+              {
+                error: inspection.error,
+              },
+            );
+            if (applied) {
+              failed += 1;
+            }
             continue;
           }
 
           if (!inspection.outputUri) {
-            await updateTranscriptStatus(videoId, transcriptId, "failed", {
-              error: "Speech job completed without a GCS result URI",
-            });
-            failed += 1;
+            const applied = await updateTranscriptStatus(
+              videoId,
+              transcriptId,
+              "failed",
+              {
+                error: "Speech job completed without a GCS result URI",
+              },
+            );
+            if (applied) {
+              failed += 1;
+            }
             continue;
           }
 
@@ -482,10 +542,17 @@ app.post(
             !rawObject ||
             !isConfiguredTranscriptsBucket(rawObject.bucket)
           ) {
-            await updateTranscriptStatus(videoId, transcriptId, "failed", {
-              error: `Unparseable or untrusted Speech output URI: ${inspection.outputUri}`,
-            });
-            failed += 1;
+            const applied = await updateTranscriptStatus(
+              videoId,
+              transcriptId,
+              "failed",
+              {
+                error: `Unparseable or untrusted Speech output URI: ${inspection.outputUri}`,
+              },
+            );
+            if (applied) {
+              failed += 1;
+            }
             continue;
           }
 
@@ -495,10 +562,17 @@ app.post(
             parsedOutput.videoId !== videoId ||
             parsedOutput.transcriptId !== transcriptId
           ) {
-            await updateTranscriptStatus(videoId, transcriptId, "failed", {
-              error: `Speech output path did not match claimed transcript: ${inspection.outputUri}`,
-            });
-            failed += 1;
+            const applied = await updateTranscriptStatus(
+              videoId,
+              transcriptId,
+              "failed",
+              {
+                error: `Speech output path did not match claimed transcript: ${inspection.outputUri}`,
+              },
+            );
+            if (applied) {
+              failed += 1;
+            }
             continue;
           }
 
@@ -509,12 +583,19 @@ app.post(
               rawObject.bucket,
               rawObject.path,
             );
-          await updateTranscriptStatus(videoId, transcriptId, "done", {
-            gcsPath,
-            segmentCount: payload.segments.length,
-            durationSeconds: payload.durationSeconds,
-          });
-          recovered += 1;
+          const applied = await updateTranscriptStatus(
+            videoId,
+            transcriptId,
+            "done",
+            {
+              gcsPath,
+              segmentCount: payload.segments.length,
+              durationSeconds: payload.durationSeconds,
+            },
+          );
+          if (applied) {
+            recovered += 1;
+          }
           const audioFileName = audioWorkFileNameFromUri(transcript.audioGcsUri);
           if (audioFileName) {
             try {
@@ -532,9 +613,50 @@ app.post(
             }
           }
         } catch (itemError) {
-          errors += 1;
           const message =
             itemError instanceof Error ? itemError.message : String(itemError);
+          if (
+            isPermanentTranscriptParseError(itemError) &&
+            videoId &&
+            transcriptId
+          ) {
+            logger.error(
+              "Permanent Speech result parse/schema failure during reconcile; marking failed",
+              {
+                component: "transcription",
+                videoId,
+                transcriptId,
+                error: message,
+              },
+            );
+            try {
+              const applied = await updateTranscriptStatus(
+                videoId,
+                transcriptId,
+                "failed",
+                { error: message },
+              );
+              if (applied) {
+                failed += 1;
+              }
+            } catch (statusError) {
+              errors += 1;
+              logger.error(
+                "Failed to persist permanent parse failure during reconcile",
+                {
+                  component: "transcription",
+                  videoId,
+                  transcriptId,
+                  error:
+                    statusError instanceof Error
+                      ? statusError.message
+                      : statusError,
+                },
+              );
+            }
+            continue;
+          }
+          errors += 1;
           logger.error("Reconcile item failed; continuing sweep", {
             component: "transcription",
             videoId,
