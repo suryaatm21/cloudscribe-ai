@@ -1,0 +1,55 @@
+{
+  "results": [
+    {
+      "alternatives": [
+        {
+          "transcript": "Hello world.",
+          "confidence": 0.94,
+          "words": [
+            {
+              "startOffset": "0s",
+              "endOffset": "0.400s",
+              "word": "Hello",
+              "confidence": 0.98
+            },
+            {
+              "startOffset": "0.400s",
+              "endOffset": "1.200s",
+              "word": "world.",
+              "confidence": 0.91
+            }
+          ]
+        }
+      ],
+      "resultEndOffset": "1.200s",
+      "languageCode": "en-US"
+    },
+    {
+      "alternatives": [
+        {
+          "transcript": "This is a test.",
+          "confidence": 0.88,
+          "words": [
+            {
+              "startOffset": "1.300s",
+              "endOffset": "1.500s",
+              "word": "This",
+              "confidence": 0.9
+            },
+            {
+              "startOffset": "1.500s",
+              "endOffset": "2.400s",
+              "word": "test.",
+              "confidence": 0.86
+            }
+          ]
+        }
+      ],
+      "resultEndOffset": "2.400s",
+      "languageCode": "en-US"
+    }
+  ],
+  "metadata": {
+    "totalBilledDuration": "3s"
+  }
+}

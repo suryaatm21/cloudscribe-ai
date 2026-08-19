@@ -13,6 +13,8 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@google-cloud/pubsub": "^5.2.0",
+    "@google-cloud/speech": "^7.2.1",
     "@google-cloud/storage": "^7.15.2",
     "express": "^4.21.1",
     "firebase-admin": "^13.6.0",

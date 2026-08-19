@@ -8,9 +8,11 @@ const storage = new Storage();
 
 const rawVideoBucketName = serviceConfig.rawVideoBucketName;
 const processedVideoBucketName = serviceConfig.processedVideoBucketName;
+const audioWorkBucketName = serviceConfig.audioWorkBucketName;
 
 const localRawVideoPath = './raw-videos';
 const localProcessedVideoPath = './processed-videos';
+const localAudioWorkPath = './audio-work';
 
 export function getStorageClient(): Storage {
   return storage;
@@ -22,10 +24,16 @@ export function getStorageClient(): Storage {
 export function setupDirectories() {
   ensureDirectoryExistence(localRawVideoPath);
   ensureDirectoryExistence(localProcessedVideoPath);
+  ensureDirectoryExistence(localAudioWorkPath);
 }
 
 /**
  * Converts a raw video to a processed format using ffmpeg.
+ *
+ * Sprint 2 intentionally dropped `-vf scale=-1:360`. The processed object is
+ * the source for Speech audio extraction, and downscaling was losing quality
+ * without a product requirement. Raw GCS originals are also never deleted
+ * (see docs/project-limitations.md).
  * @param {string} rawVideoName - The name of the raw video file.
  * @param {string} processedVideoName - The name of the processed video file.
  * @returns {Promise<void>} A promise that resolves when the conversion is complete.
@@ -33,7 +41,6 @@ export function setupDirectories() {
 export function convertVideo(rawVideoName: string, processedVideoName: string) {
   return new Promise<void>((resolve, reject) => {
     ffmpeg(`${localRawVideoPath}/${rawVideoName}`)
-      .outputOptions('-vf', 'scale=-1:360')
       .on('end', () => {
         logger.info('Video conversion finished', {
           component: 'storage',
@@ -52,6 +59,43 @@ export function convertVideo(rawVideoName: string, processedVideoName: string) {
         reject(err);
       })
       .save(`${localProcessedVideoPath}/${processedVideoName}`);
+  });
+}
+
+/**
+ * Extracts audio from a processed video file and stores it locally as FLAC.
+ * @param {string} processedVideoName - The name of the processed video file.
+ * @param {string} audioFileName - The target audio file name (should end with .flac).
+ * @returns {Promise<void>} A promise resolved when extraction completes.
+ */
+export function extractAudio(
+  processedVideoName: string,
+  audioFileName: string,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    ffmpeg(`${localProcessedVideoPath}/${processedVideoName}`)
+      .noVideo()
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .audioCodec('flac')
+      .on('end', () => {
+        logger.info('Audio extraction finished', {
+          component: 'storage',
+          inputFile: processedVideoName,
+          outputFile: audioFileName,
+        });
+        resolve();
+      })
+      .on('error', (err) => {
+        logger.error('Audio extraction error', {
+          component: 'storage',
+          inputFile: processedVideoName,
+          outputFile: audioFileName,
+          error: err instanceof Error ? err.message : err,
+        });
+        reject(err);
+      })
+      .save(`${localAudioWorkPath}/${audioFileName}`);
   });
 }
 
@@ -92,6 +136,63 @@ export async function uploadProcessedVideo(fileName: string) {
 }
 
 /**
+ * Uploads an extracted audio file for transcription, then deletes the local FLAC.
+ * @param {string} fileName - The local audio file name.
+ * @returns {Promise<string>} GCS URI for the uploaded audio object.
+ */
+export async function uploadAudioForTranscription(fileName: string) {
+  const bucket = storage.bucket(audioWorkBucketName);
+  const localPath = `${localAudioWorkPath}/${fileName}`;
+  await bucket.upload(localPath, {
+    destination: fileName,
+    metadata: { contentType: 'audio/flac' },
+  });
+  const gcsUri = `gs://${audioWorkBucketName}/${fileName}`;
+  logger.info('Uploaded audio for transcription', {
+    component: 'storage',
+    fileName,
+    bucket: audioWorkBucketName,
+  });
+  await deleteAudioWorkFile(fileName);
+  return gcsUri;
+}
+
+/**
+ * Deletes the GCS audio-work object after the transcript is marked done.
+ * Bucket lifecycle is the fallback if this call fails.
+ */
+export async function deleteAudioWorkObject(fileName: string): Promise<void> {
+  try {
+    await storage.bucket(audioWorkBucketName).file(fileName).delete({
+      ignoreNotFound: true,
+    });
+    logger.info('Deleted audio work object', {
+      component: 'storage',
+      fileName,
+      bucket: audioWorkBucketName,
+    });
+  } catch (error) {
+    logger.warn('Failed to delete audio work object', {
+      component: 'storage',
+      fileName,
+      error: error instanceof Error ? error.message : error,
+    });
+  }
+}
+
+export function audioWorkFileNameFromUri(audioGcsUri?: string): string | undefined {
+  if (!audioGcsUri || !audioGcsUri.startsWith('gs://')) {
+    return undefined;
+  }
+  const withoutScheme = audioGcsUri.slice('gs://'.length);
+  const slash = withoutScheme.indexOf('/');
+  if (slash < 0 || slash === withoutScheme.length - 1) {
+    return undefined;
+  }
+  return withoutScheme.slice(slash + 1);
+}
+
+/**
  * Deletes a raw video file from the local file system.
  * @param {string} fileName - The name of the raw video file to delete.
  * @returns {Promise<void>} A promise that resolves when the file is deleted.
@@ -107,6 +208,15 @@ export function deleteRawVideo(fileName: string) {
  */
 export function deleteProcessedVideo(fileName: string) {
   return deleteFile(`${localProcessedVideoPath}/${fileName}`);
+}
+
+/**
+ * Deletes a local audio work file.
+ * @param {string} fileName - The name of the audio file to delete.
+ * @returns {Promise<void>} Resolves when deletion completes.
+ */
+export function deleteAudioWorkFile(fileName: string) {
+  return deleteFile(`${localAudioWorkPath}/${fileName}`);
 }
 
 function deleteFile(filePath: string) {
