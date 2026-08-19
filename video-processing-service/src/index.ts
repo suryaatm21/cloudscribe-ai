@@ -26,7 +26,6 @@ import {
   decodeJsonPayload,
   logRequest,
   sendSuccessResponse,
-  sendBadRequestResponse,
   sendAcknowledgmentResponse,
 } from "./pubsubHandler";
 import { logger } from "./logger";
@@ -162,13 +161,21 @@ app.post(
         component: "transcription",
         error: error instanceof Error ? error.message : error,
       });
-      sendBadRequestResponse(res, "Invalid transcription payload");
+      // Pub/Sub retries any non-2xx until the dead-letter limit. A malformed
+      // payload will never become valid, so ack it.
+      sendAcknowledgmentResponse(res);
       return;
     }
 
     const { videoId, transcriptId, audioGcsUri } = payload;
     if (!videoId || !transcriptId || !audioGcsUri) {
-      sendBadRequestResponse(res, "Missing transcription job fields");
+      logger.error("Transcription job payload is missing required fields", {
+        component: "transcription",
+        videoId,
+        transcriptId,
+        hasAudioGcsUri: Boolean(audioGcsUri),
+      });
+      sendAcknowledgmentResponse(res);
       return;
     }
 
@@ -310,6 +317,11 @@ app.post(
     const objectName = notification.name;
     const bucketName = notification.bucket;
     if (!objectName || !bucketName) {
+      logger.error("Transcript-ready payload is missing bucket or object name", {
+        component: "transcription",
+        hasObjectName: Boolean(objectName),
+        hasBucketName: Boolean(bucketName),
+      });
       sendAcknowledgmentResponse(res);
       return;
     }
@@ -401,118 +413,145 @@ app.post(
   async (_req: Request, res: Response): Promise<void> => {
     const staleAfterMs = serviceConfig.reconcileStaleAfterMs;
     const now = Date.now();
-    let inspected = 0;
+    let processed = 0;
     let failed = 0;
     let recovered = 0;
     let stillRunning = 0;
     let needsReview = 0;
+    let errors = 0;
 
     try {
       const candidates = await listTranscriptsForReconcile();
       for (const transcript of candidates) {
         const videoId = transcript.videoId;
         const transcriptId = transcript.id;
-        if (!videoId || !transcriptId) {
-          continue;
-        }
+        try {
+          if (!videoId || !transcriptId) {
+            continue;
+          }
 
-        const claimedAt = timestampToMillis(
-          transcript.claimedAt ?? transcript.createdAt,
-        );
-        if (claimedAt !== undefined && now - claimedAt < staleAfterMs) {
-          stillRunning += 1;
-          continue;
-        }
+          const claimedAt = timestampToMillis(
+            transcript.claimedAt ?? transcript.createdAt,
+          );
+          if (claimedAt !== undefined && now - claimedAt < staleAfterMs) {
+            stillRunning += 1;
+            continue;
+          }
 
-        inspected += 1;
+          processed += 1;
 
-        if (!transcript.operationName) {
-          if (transcript.status === "needs_review") {
+          if (!transcript.operationName) {
+            if (transcript.status === "needs_review") {
+              needsReview += 1;
+              continue;
+            }
+            await updateTranscriptStatus(videoId, transcriptId, "needs_review", {
+              error:
+                "Claimed without a persisted Speech operationName; RPC may have started",
+            });
             needsReview += 1;
             continue;
           }
-          await updateTranscriptStatus(videoId, transcriptId, "needs_review", {
-            error:
-              "Claimed without a persisted Speech operationName; RPC may have started",
+
+          const inspection = await inspectBatchRecognizeOperation(
+            transcript.operationName,
+          );
+          if (!inspection.done) {
+            stillRunning += 1;
+            continue;
+          }
+
+          if (inspection.error) {
+            await updateTranscriptStatus(videoId, transcriptId, "failed", {
+              error: inspection.error,
+            });
+            failed += 1;
+            continue;
+          }
+
+          if (!inspection.outputUri) {
+            await updateTranscriptStatus(videoId, transcriptId, "failed", {
+              error: "Speech job completed without a GCS result URI",
+            });
+            failed += 1;
+            continue;
+          }
+
+          const rawObject = parseGsUri(inspection.outputUri);
+          if (
+            !rawObject ||
+            !isConfiguredTranscriptsBucket(rawObject.bucket)
+          ) {
+            await updateTranscriptStatus(videoId, transcriptId, "failed", {
+              error: `Unparseable or untrusted Speech output URI: ${inspection.outputUri}`,
+            });
+            failed += 1;
+            continue;
+          }
+
+          const parsedOutput = parseRawTranscriptObjectName(rawObject.path);
+          if (
+            !parsedOutput ||
+            parsedOutput.videoId !== videoId ||
+            parsedOutput.transcriptId !== transcriptId
+          ) {
+            await updateTranscriptStatus(videoId, transcriptId, "failed", {
+              error: `Speech output path did not match claimed transcript: ${inspection.outputUri}`,
+            });
+            failed += 1;
+            continue;
+          }
+
+          const { gcsPath, transcript: payload } =
+            await finalizeTranscriptFromRawObject(
+              videoId,
+              transcriptId,
+              rawObject.bucket,
+              rawObject.path,
+            );
+          await updateTranscriptStatus(videoId, transcriptId, "done", {
+            gcsPath,
+            segmentCount: payload.segments.length,
+            durationSeconds: payload.durationSeconds,
           });
-          needsReview += 1;
-          continue;
-        }
-
-        const inspection = await inspectBatchRecognizeOperation(
-          transcript.operationName,
-        );
-        if (!inspection.done) {
-          stillRunning += 1;
-          continue;
-        }
-
-        if (inspection.error) {
-          await updateTranscriptStatus(videoId, transcriptId, "failed", {
-            error: inspection.error,
-          });
-          failed += 1;
-          continue;
-        }
-
-        if (!inspection.outputUri) {
-          await updateTranscriptStatus(videoId, transcriptId, "failed", {
-            error: "Speech job completed without a GCS result URI",
-          });
-          failed += 1;
-          continue;
-        }
-
-        const rawObject = parseGsUri(inspection.outputUri);
-        if (
-          !rawObject ||
-          !isConfiguredTranscriptsBucket(rawObject.bucket)
-        ) {
-          await updateTranscriptStatus(videoId, transcriptId, "failed", {
-            error: `Unparseable or untrusted Speech output URI: ${inspection.outputUri}`,
-          });
-          failed += 1;
-          continue;
-        }
-
-        const parsedOutput = parseRawTranscriptObjectName(rawObject.path);
-        if (
-          !parsedOutput ||
-          parsedOutput.videoId !== videoId ||
-          parsedOutput.transcriptId !== transcriptId
-        ) {
-          await updateTranscriptStatus(videoId, transcriptId, "failed", {
-            error: `Speech output path did not match claimed transcript: ${inspection.outputUri}`,
-          });
-          failed += 1;
-          continue;
-        }
-
-        const { gcsPath, transcript: payload } =
-          await finalizeTranscriptFromRawObject(
+          recovered += 1;
+          const audioFileName = audioWorkFileNameFromUri(transcript.audioGcsUri);
+          if (audioFileName) {
+            try {
+              await deleteAudioWorkObject(audioFileName);
+            } catch (cleanupError) {
+              logger.warn("Failed to delete audio work object after recovery", {
+                component: "transcription",
+                videoId,
+                transcriptId,
+                error:
+                  cleanupError instanceof Error
+                    ? cleanupError.message
+                    : cleanupError,
+              });
+            }
+          }
+        } catch (itemError) {
+          errors += 1;
+          const message =
+            itemError instanceof Error ? itemError.message : String(itemError);
+          logger.error("Reconcile item failed; continuing sweep", {
+            component: "transcription",
             videoId,
             transcriptId,
-            rawObject.bucket,
-            rawObject.path,
-          );
-        await updateTranscriptStatus(videoId, transcriptId, "done", {
-          gcsPath,
-          segmentCount: payload.segments.length,
-          durationSeconds: payload.durationSeconds,
-        });
-        const audioFileName = audioWorkFileNameFromUri(transcript.audioGcsUri);
-        if (audioFileName) {
-          await deleteAudioWorkObject(audioFileName);
+            error: message,
+          });
         }
-        recovered += 1;
       }
 
       res.status(200).json({
-        inspected,
+        processed,
+        inspected: processed,
         failed,
         recovered,
         stillRunning,
         needsReview,
+        errors,
       });
     } catch (error) {
       logger.error("Transcript reconciliation failed", {

@@ -37,6 +37,7 @@ jest.mock("firebase-admin/firestore", () => ({
     }
   },
   Timestamp: { now: () => ({ seconds: 1, nanoseconds: 0 }) },
+  FieldValue: { delete: () => ({ __fieldValueDelete: true }) },
 }));
 
 jest.mock("../config", () => ({
@@ -169,6 +170,23 @@ describe("transcription HTTP endpoints", () => {
       audioGcsUri: "gs://atmuri-yt-audio-work/uid-1762753390224.flac",
     };
 
+    it("acks a malformed envelope with 200 so Pub/Sub does not retry", async () => {
+      const response = await postJson("/transcribe-audio", { not: "pubsub" });
+      expect(response.status).toBe(200);
+      expect(claimTranscriptJob).not.toHaveBeenCalled();
+      expect(startTranscriptionJob).not.toHaveBeenCalled();
+    });
+
+    it("acks a payload missing required fields with 200 so Pub/Sub does not retry", async () => {
+      const response = await postJson(
+        "/transcribe-audio",
+        pubsubBody({ videoId: "uid-1762753390224" }),
+      );
+      expect(response.status).toBe(200);
+      expect(claimTranscriptJob).not.toHaveBeenCalled();
+      expect(startTranscriptionJob).not.toHaveBeenCalled();
+    });
+
     it("returns 200 without claiming when transcription is disabled", async () => {
       serviceConfig.enableTranscription = false;
       const response = await postJson("/transcribe-audio", pubsubBody(job));
@@ -264,6 +282,21 @@ describe("transcription HTTP endpoints", () => {
 
   describe("POST /transcript-ready", () => {
     const objectName = "raw/uid-1762753390224/primary/out.json";
+
+    it("acks a malformed envelope with 200 so Pub/Sub does not retry", async () => {
+      const response = await postJson("/transcript-ready", { not: "pubsub" });
+      expect(response.status).toBe(200);
+      expect(finalizeTranscriptFromRawObject).not.toHaveBeenCalled();
+    });
+
+    it("acks a notification missing bucket and object name with 200", async () => {
+      const response = await postJson(
+        "/transcript-ready",
+        pubsubBody({ eventType: "OBJECT_FINALIZE" }),
+      );
+      expect(response.status).toBe(200);
+      expect(finalizeTranscriptFromRawObject).not.toHaveBeenCalled();
+    });
 
     it("acks objects from a bucket other than the configured transcripts bucket", async () => {
       const response = await postJson(
@@ -387,9 +420,11 @@ describe("transcription HTTP endpoints", () => {
       const body = JSON.parse(response.text) as {
         recovered: number;
         failed: number;
+        errors: number;
       };
       expect(body.recovered).toBe(1);
       expect(body.failed).toBe(0);
+      expect(body.errors).toBe(0);
       expect(updateTranscriptStatus).toHaveBeenCalledWith(
         "uid-1762753390224",
         "primary",
@@ -424,6 +459,78 @@ describe("transcription HTTP endpoints", () => {
         expect.objectContaining({
           error: expect.stringContaining("may have started"),
         }),
+      );
+    });
+
+    it("continues the sweep when one item throws and still recovers the others", async () => {
+      (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
+        {
+          id: "broken",
+          videoId: "uid-broken",
+          status: "running",
+          language: "en-US",
+          model: "long",
+          operationName: "operations/bad",
+          claimedAt: { toMillis: () => 0 },
+        },
+        {
+          id: "primary",
+          videoId: "uid-1762753390224",
+          status: "running",
+          language: "en-US",
+          model: "long",
+          operationName: "operations/good",
+          claimedAt: { toMillis: () => 0 },
+        },
+      ]);
+      (inspectBatchRecognizeOperation as jest.Mock).mockImplementation(
+        async (operationName: string) => ({
+          done: true,
+          outputUri:
+            operationName === "operations/bad"
+              ? "gs://atmuri-yt-transcripts/raw/uid-broken/broken/out.json"
+              : "gs://atmuri-yt-transcripts/raw/uid-1762753390224/primary/out.json",
+        }),
+      );
+      (finalizeTranscriptFromRawObject as jest.Mock).mockImplementation(
+        async (_videoId: string, transcriptId: string) => {
+          if (transcriptId === "broken") {
+            throw new Error("malformed Speech result");
+          }
+          return {
+            gcsPath:
+              "gs://atmuri-yt-transcripts/normalized/uid-1762753390224/primary.json",
+            transcript: {
+              segments: [{ text: "Hi", startTime: 0, endTime: 1 }],
+              durationSeconds: 1,
+            },
+          };
+        },
+      );
+
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        processed: number;
+        recovered: number;
+        failed: number;
+        errors: number;
+      };
+      expect(body.processed).toBe(2);
+      expect(body.recovered).toBe(1);
+      expect(body.failed).toBe(0);
+      expect(body.errors).toBe(1);
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "done",
+        expect.objectContaining({ segmentCount: 1 }),
+      );
+      expect(updateTranscriptStatus).not.toHaveBeenCalledWith(
+        "uid-broken",
+        "broken",
+        "done",
+        expect.anything(),
       );
     });
   });

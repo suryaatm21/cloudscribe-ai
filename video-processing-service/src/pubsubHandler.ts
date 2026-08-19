@@ -93,6 +93,8 @@ export function sendSuccessResponse(res: Response, message: string): void {
 
 /**
  * Sends an error response for bad requests.
+ * Do not use this from Pub/Sub push handlers: Pub/Sub retries every non-2xx
+ * until the dead-letter limit, so permanently-bad payloads must be acked.
  * @param {Response} res - The Express response object.
  * @param {string} message - The error message to send.
  */
