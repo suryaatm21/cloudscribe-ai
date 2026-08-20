@@ -25,13 +25,20 @@
 - **Potential Solution:**
   - Use a shared types package (e.g., `utils/types/video.ts`) and import it everywhere (backend, frontend, functions) for end-to-end type safety.
 
-## Processed Video Quality And Raw Retention
+## Processed Video Quality, Raw Retention, And OCR
 
 - **Current:** `convertVideo` no longer applies `-vf scale=-1:360`. Sprint 2 dropped the downscale so the processed object (and the FLAC extracted from it) keep source resolution. Raw objects in `atmuri-yt-raw-videos` are also never deleted; `deleteRawVideo` only removes the local temp copy.
 - **Tradeoff:** Processed videos and raw originals consume more storage than a 360p pipeline with raw expiry.
-- **Potential Solutions:**
-  - Reintroduce an explicit, configurable scale filter if product wants a standard watch resolution.
+- **Constraint (load-bearing for OCR):** original resolution is required for usable OCR on slides, diagrams, and equations. OCR on 360p slides is poor; subscripts and exponents become unreadable. If anyone later reintroduces downscaling to reduce egress, OCR quality degrades **silently** — the visual pipeline will still report success. This coupling is part of the lecture-content design ([`docs/features/multimodal-lecture-content.md`](features/multimodal-lecture-content.md)); keep it visible from the transcode side too.
+- **Potential Solutions (watch path only, not OCR):**
+  - Add a **separate** watch rendition if product wants 360p playback, and keep a full-resolution object for visual analysis. Do not reuse a downscaled watch file as the OCR source.
   - Add lifecycle expiry on the raw bucket (tracked for the security-hardening pass).
+
+## Firestore Rules And Frame Privacy
+
+- **Current:** the repo has **no Firestore security rules**. Processed playback objects are `makePublic()`. Owner-only rules and signed video URLs are a planned security pass, not done.
+- **Tradeoff:** that gap is already real for video metadata. Extracted lecture frames (specified, not built) are a different risk class than transcripts: images of course material, potentially copyrighted, potentially containing other students’ faces. A leaked frame URL is a still of the lecture.
+- **Potential Solutions:** ship owner-only Firestore rules and non-public frame objects **before** storing frames. See the privacy finding in [`docs/features/multimodal-lecture-content.md`](features/multimodal-lecture-content.md).
 
 ## Video ID/Processing Strategy
 
