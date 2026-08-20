@@ -1,6 +1,6 @@
 # Cost operations (out-of-pocket GCP)
 
-Promo credits on project `yt-clone-385f4` expired (pay-as-you-go). Artifact Registry was ~$0.41/month (19 Aug), then ~$0.59/month (~6.4 GiB) after deleting the legacy `gcr.io` repo (1,162 MiB), applying cleanup policies, and pushing six new images. It should settle near ~$0.16/month after the 7-day untagged / 14-day tagged windows. Cloud Build on this branch uses `E2_STANDARD_2`. Cloud Run min-instances is 0; GCS is under the 5 GB Always Free tier.
+Promo credits on project `yt-clone-385f4` expired (pay-as-you-go). Artifact Registry was ~$0.41/month (19 Aug), peaked at ~$0.59/month (~6.4 GiB) after deleting the legacy `gcr.io` repo (1,162 MiB), applying cleanup policies, and pushing six new images, and is now **worker 1443.023 MB + web 1888.882 MB ≈ 3.25 GiB (~$0.28/month)**. Cleanup policies are live on both app repos. Cloud Build on this branch uses `E2_STANDARD_2`. Cloud Run min-instances is 0; GCS is under the 5 GB Always Free tier.
 
 This file lists **human-run** bucket and registry commands. Do **not** apply them from CI. Deleting images is irreversible.
 

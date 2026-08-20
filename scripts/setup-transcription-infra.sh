@@ -268,6 +268,7 @@ function ensure_push_subscription() {
       --min-retry-delay 10 \
       --max-retry-delay 600 \
       --message-retention-duration "${LIFECYCLE_DAYS}d" \
+      --expiration-period=never \
       --dead-letter-topic "$dlq_topic" \
       --max-delivery-attempts "$DLQ_MAX_DELIVERY" \
       --project "$PROJECT_ID"
@@ -282,6 +283,7 @@ function ensure_push_subscription() {
       --min-retry-delay 10 \
       --max-retry-delay 600 \
       --message-retention-duration "${LIFECYCLE_DAYS}d" \
+      --expiration-period=never \
       --dead-letter-topic "$dlq_topic" \
       --max-delivery-attempts "$DLQ_MAX_DELIVERY" \
       --project "$PROJECT_ID"
@@ -303,12 +305,14 @@ function ensure_pull_subscription() {
         --push-endpoint="" \
         --ack-deadline 60 \
         --message-retention-duration "${LIFECYCLE_DAYS}d" \
+        --expiration-period=never \
         --project "$PROJECT_ID"
     else
       echo "Updating pull subscription ${subscription}..."
       gcloud pubsub subscriptions update "$subscription" \
         --ack-deadline 60 \
         --message-retention-duration "${LIFECYCLE_DAYS}d" \
+        --expiration-period=never \
         --project "$PROJECT_ID"
     fi
   else
@@ -317,6 +321,7 @@ function ensure_pull_subscription() {
       --topic "$topic" \
       --ack-deadline 60 \
       --message-retention-duration "${LIFECYCLE_DAYS}d" \
+      --expiration-period=never \
       --project "$PROJECT_ID"
   fi
 }

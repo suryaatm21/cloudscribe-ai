@@ -249,9 +249,11 @@ export async function updateTranscript(
 }
 
 /**
- * Last-write-wins is kept for in-flight transitions. The race we guard is
- * regressing a finished transcript (`done` or `no_audio_detected`) —
- * notification vs sweeper vs a late failure write.
+ * Same-status is not a transition. The race we guard is the sweeper writing
+ * `done` after `/transcript-ready` already finished the same document: that
+ * must return false so reconcile does not report a `recovered` that never
+ * happened. Last-write-wins is kept for in-flight transitions. We also
+ * refuse to regress a finished transcript (`done` or `no_audio_detected`).
  */
 function isFinishedTranscriptStatus(status: TranscriptStatus): boolean {
   return status === "done" || status === "no_audio_detected";
@@ -261,8 +263,11 @@ export function shouldApplyTranscriptStatusTransition(
   current: TranscriptStatus | undefined,
   next: TranscriptStatus,
 ): boolean {
+  if (current === next) {
+    return false;
+  }
   if (current !== undefined && isFinishedTranscriptStatus(current)) {
-    return next === current;
+    return false;
   }
   return true;
 }

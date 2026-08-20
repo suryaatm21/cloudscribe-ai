@@ -15,18 +15,24 @@ jest.mock("@google-cloud/speech", () => ({
   },
 }));
 
-jest.mock("../config", () => ({
-  serviceConfig: {
-    speechToTextLanguage: "en-US",
-    speechToTextModel: "long",
-    transcriptsBucketName: "test-transcripts",
-    speechLocation: "us-central1",
-    rawTranscriptPrefix: "raw",
-    normalizedTranscriptPrefix: "normalized",
-    projectId: "yt-clone-385f4",
-    speechProcessingStrategy: "STANDARD",
-  },
-}));
+jest.mock("../config", () => {
+  const { speechApiProcessingStrategy } = jest.requireActual("../config") as {
+    speechApiProcessingStrategy: (strategy: string) => string;
+  };
+  return {
+    speechApiProcessingStrategy,
+    serviceConfig: {
+      speechToTextLanguage: "en-US",
+      speechToTextModel: "long",
+      transcriptsBucketName: "test-transcripts",
+      speechLocation: "us-central1",
+      rawTranscriptPrefix: "raw",
+      normalizedTranscriptPrefix: "normalized",
+      projectId: "yt-clone-385f4",
+      speechProcessingStrategy: "STANDARD",
+    },
+  };
+});
 
 jest.mock("../storage", () => ({
   getStorageClient: () => ({
@@ -269,6 +275,59 @@ describe("transcription module", () => {
       expect(error).toBeInstanceOf(NoAudioDetectedError);
       expect(error).not.toBeInstanceOf(PermanentTranscriptParseError);
     }
+  });
+
+  it("treats a present non-string transcript as a permanent parse error", () => {
+    const malformedValues: unknown[] = [17, { text: "nope" }, null];
+    for (const transcript of malformedValues) {
+      expect(() =>
+        buildTranscriptPayload("video-9", {
+          results: [{ alternatives: [{ transcript }] }],
+        }),
+      ).toThrow(PermanentTranscriptParseError);
+      expect(() =>
+        buildTranscriptPayload("video-9", {
+          results: [{ alternatives: [{ transcript }] }],
+        }),
+      ).toThrow(/transcript is not a string/);
+    }
+  });
+
+  it("fails the whole payload when a valid segment is mixed with a malformed transcript", () => {
+    expect(() =>
+      buildTranscriptPayload("video-9", {
+        results: [
+          {
+            alternatives: [
+              {
+                transcript: "Hello",
+                words: [
+                  { startOffset: "0s", endOffset: "1s", word: "Hello" },
+                ],
+              },
+            ],
+          },
+          { alternatives: [{ transcript: 17 }] },
+        ],
+      }),
+    ).toThrow(PermanentTranscriptParseError);
+    expect(() =>
+      buildTranscriptPayload("video-9", {
+        results: [
+          {
+            alternatives: [
+              {
+                transcript: "Hello",
+                words: [
+                  { startOffset: "0s", endOffset: "1s", word: "Hello" },
+                ],
+              },
+            ],
+          },
+          { alternatives: [{ transcript: 17 }] },
+        ],
+      }),
+    ).not.toThrow(NoAudioDetectedError);
   });
 
   it("fails loudly on a malformed entry instead of persisting a partial transcript", () => {

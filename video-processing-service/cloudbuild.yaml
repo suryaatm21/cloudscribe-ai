@@ -65,12 +65,15 @@ steps:
       # manual `gcloud builds submit --substitutions`) can flip it to true
       # after infra is provisioned without changing this file. Hardcoding
       # false here would silently disable transcription on every merge to main.
-      - "--update-env-vars=PROCESSING_MAX_ATTEMPTS=3,ENABLE_TRANSCRIPTION=${_ENABLE_TRANSCRIPTION},SPEECH_PROCESSING_STRATEGY=${_SPEECH_PROCESSING_STRATEGY},SERVICE_VERSION=$COMMIT_SHA"
+      # Bucket/topic names are substitutions so the deployed worker matches
+      # what `scripts/setup-transcription-infra.sh` provisioned, instead of
+      # relying on `config.ts` defaults drifting from live infra.
+      - "--update-env-vars=PROCESSING_MAX_ATTEMPTS=3,ENABLE_TRANSCRIPTION=${_ENABLE_TRANSCRIPTION},SPEECH_PROCESSING_STRATEGY=${_SPEECH_PROCESSING_STRATEGY},TRANSCRIPTS_BUCKET_NAME=${_TRANSCRIPTS_BUCKET_NAME},AUDIO_WORK_BUCKET_NAME=${_AUDIO_WORK_BUCKET_NAME},TRANSCRIPTION_TOPIC_NAME=${_TRANSCRIPTION_TOPIC_NAME},SERVICE_VERSION=$COMMIT_SHA"
       - "--labels=commit=$COMMIT_SHA"
 
-# Default stays off until transcription infra is provisioned. After that, set
-# the GitHub trigger substitution `_ENABLE_TRANSCRIPTION=true` so later deploys
-# keep the flag on. Confirmed trigger: name `video-processing-service`,
+# Default stays off. Infra is provisioned; flip the GitHub trigger
+# substitution `_ENABLE_TRANSCRIPTION=true` only when turning transcription
+# on. Confirmed trigger: name `video-processing-service`,
 # region `global` (`gcloud builds triggers list --project=yt-clone-385f4`):
 #   gcloud builds triggers update github video-processing-service \
 #     --region=global --project=yt-clone-385f4 \
@@ -82,6 +85,9 @@ steps:
 substitutions:
   _ENABLE_TRANSCRIPTION: "false"
   _SPEECH_PROCESSING_STRATEGY: "STANDARD"
+  _TRANSCRIPTS_BUCKET_NAME: "atmuri-yt-transcripts"
+  _AUDIO_WORK_BUCKET_NAME: "atmuri-yt-audio-work"
+  _TRANSCRIPTION_TOPIC_NAME: "transcription-jobs"
 
 # Build timeout sized for E2_STANDARD_2 (2 vCPU). The prior 600s budget
 # matched N1_HIGHCPU_8 (~4m last success); 2 vCPU can take ~3-4x longer.

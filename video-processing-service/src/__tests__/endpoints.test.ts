@@ -16,6 +16,7 @@ import {
   SpeechJobStartError,
   startTranscriptionJob,
 } from "../transcription";
+import { logger } from "../logger";
 import { app } from "../index";
 
 jest.mock("firebase-admin", () => ({
@@ -504,6 +505,26 @@ describe("transcription HTTP endpoints", () => {
   });
 
   describe("POST /reconcile-transcripts", () => {
+    it("returns 200 without querying or calling Speech when transcription is disabled", async () => {
+      serviceConfig.enableTranscription = false;
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        skipped: boolean;
+        reason: string;
+      };
+      expect(body.skipped).toBe(true);
+      expect(body.reason).toBe("transcription disabled");
+      expect(listTranscriptsForReconcile).not.toHaveBeenCalled();
+      expect(inspectBatchRecognizeOperation).not.toHaveBeenCalled();
+      expect(finalizeTranscriptFromRawObject).not.toHaveBeenCalled();
+      expect(updateTranscriptStatus).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(
+        "Skipping transcript reconciliation; ENABLE_TRANSCRIPTION is false",
+        expect.objectContaining({ component: "transcription" }),
+      );
+    });
+
     it("recovers a completed Speech job from operation.result", async () => {
       (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
         {
@@ -610,6 +631,51 @@ describe("transcription HTTP endpoints", () => {
         "primary",
         "failed",
         expect.objectContaining({ error: "Speech job failed" }),
+      );
+    });
+
+    it("does not count a sweeper done write as recovered when notification already finished", async () => {
+      (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
+        {
+          id: "primary",
+          videoId: "uid-1762753390224",
+          status: "running",
+          language: "en-US",
+          model: "long",
+          operationName: "operations/abc",
+          claimedAt: { toMillis: () => 0 },
+        },
+      ]);
+      (inspectBatchRecognizeOperation as jest.Mock).mockResolvedValue({
+        done: true,
+        outputUri:
+          "gs://atmuri-yt-transcripts/raw/uid-1762753390224/primary/out.json",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockResolvedValue({
+        gcsPath:
+          "gs://atmuri-yt-transcripts/normalized/uid-1762753390224/primary.json",
+        transcript: {
+          segments: [{ text: "Hi", startTime: 0, endTime: 1 }],
+          durationSeconds: 1,
+        },
+      });
+      (updateTranscriptStatus as jest.Mock).mockResolvedValue(false);
+
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        recovered: number;
+        failed: number;
+        errors: number;
+      };
+      expect(body.recovered).toBe(0);
+      expect(body.failed).toBe(0);
+      expect(body.errors).toBe(0);
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "done",
+        expect.objectContaining({ segmentCount: 1 }),
       );
     });
 

@@ -1,5 +1,5 @@
 import { v2 } from "@google-cloud/speech";
-import { serviceConfig } from "./config";
+import { serviceConfig, speechApiProcessingStrategy } from "./config";
 import { getStorageClient } from "./storage";
 import { logger } from "./logger";
 
@@ -332,10 +332,9 @@ export async function startTranscriptionJob(
     recognitionOutputConfig: {
       gcsOutputConfig: { uri: outputUri },
     },
-    processingStrategy:
-      serviceConfig.speechProcessingStrategy === "DYNAMIC_BATCHING"
-        ? ("DYNAMIC_BATCHING" as const)
-        : ("PROCESSING_STRATEGY_UNSPECIFIED" as const),
+    processingStrategy: speechApiProcessingStrategy(
+      serviceConfig.speechProcessingStrategy,
+    ),
   };
 
   try {
@@ -452,7 +451,7 @@ export function buildTranscriptPayload(
 
   results.forEach((result, index) => {
     const alternative = firstAlternative(result, index);
-    const text = stringField(alternative, "transcript")?.trim() ?? "";
+    const text = speechTranscriptText(alternative, index);
     if (!text) {
       return;
     }
@@ -696,13 +695,25 @@ function readField(
   return undefined;
 }
 
-function stringField(
-  source: Record<string, unknown>,
-  camel: string,
-  snake?: string,
-): string | undefined {
-  const value = readField(source, camel, snake);
-  return typeof value === "string" ? value : undefined;
+/**
+ * Speech `transcript` is a string when present. Absent, empty, and
+ * whitespace-only values mean no usable speech in that result. A present
+ * non-string is malformed output and must not be coerced to silence.
+ */
+function speechTranscriptText(
+  alternative: Record<string, unknown>,
+  resultIndex: number,
+): string {
+  const value = readField(alternative, "transcript");
+  if (value === undefined) {
+    return "";
+  }
+  if (typeof value !== "string") {
+    throwPermanentParse(
+      `Unexpected Speech v2 result JSON: results[${resultIndex}].alternatives[0].transcript is not a string`,
+    );
+  }
+  return value.trim();
 }
 
 function numberField(

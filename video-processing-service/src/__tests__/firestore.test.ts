@@ -243,15 +243,18 @@ describe("transcript status updates", () => {
     expect(payload.segmentCount).toBe(0);
   });
 
-  it("refuses to regress a done transcript and allows recovery to done", () => {
+  it("refuses to regress a finished transcript and treats same-status as no transition", () => {
     expect(shouldApplyTranscriptStatusTransition("done", "failed")).toBe(false);
     expect(shouldApplyTranscriptStatusTransition("done", "running")).toBe(false);
-    expect(shouldApplyTranscriptStatusTransition("done", "done")).toBe(true);
+    expect(shouldApplyTranscriptStatusTransition("done", "done")).toBe(false);
     expect(shouldApplyTranscriptStatusTransition("needs_review", "done")).toBe(
       true,
     );
     expect(shouldApplyTranscriptStatusTransition("running", "failed")).toBe(
       true,
+    );
+    expect(shouldApplyTranscriptStatusTransition("running", "running")).toBe(
+      false,
     );
     expect(
       shouldApplyTranscriptStatusTransition("no_audio_detected", "failed"),
@@ -261,7 +264,7 @@ describe("transcript status updates", () => {
         "no_audio_detected",
         "no_audio_detected",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       shouldApplyTranscriptStatusTransition("running", "no_audio_detected"),
     ).toBe(true);
@@ -342,5 +345,110 @@ describe("updateTranscriptStatus", () => {
       }),
     ).resolves.toBe(false);
     expect(setFn).not.toHaveBeenCalled();
+  });
+
+  it("returns false without writing when current already matches next", async () => {
+    currentStatus = "done";
+    await expect(
+      updateTranscriptStatus("video-1", "primary", "done", {
+        gcsPath: "gs://atmuri-yt-transcripts/normalized/video-1/primary.json",
+      }),
+    ).resolves.toBe(false);
+    expect(setFn).not.toHaveBeenCalled();
+
+    currentStatus = "no_audio_detected";
+    await expect(
+      updateTranscriptStatus("video-1", "primary", "no_audio_detected", {
+        segmentCount: 0,
+      }),
+    ).resolves.toBe(false);
+    expect(setFn).not.toHaveBeenCalled();
+  });
+
+  it("sweeper/notification race: a later done write is not a recovered transition", async () => {
+    const store: {
+      version: number;
+      data: { status: TranscriptDocument["status"]; videoId: string };
+    } = {
+      version: 0,
+      data: { status: "running", videoId: "video-1" },
+    };
+
+    let arrivals = 0;
+    let releaseFirstWave: () => void = () => {};
+    const firstWave = new Promise<void>((resolve) => {
+      releaseFirstWave = resolve;
+    });
+    let firstWaveReleased = false;
+
+    const { Firestore } = jest.requireMock("firebase-admin/firestore") as {
+      Firestore: {
+        prototype: {
+          runTransaction: (
+            fn: (tx: {
+              get: () => Promise<{
+                exists: boolean;
+                data: () => unknown;
+              }>;
+              set: (_ref: unknown, mutation: Record<string, unknown>) => void;
+            }) => Promise<unknown>,
+          ) => Promise<unknown>;
+        };
+      };
+    };
+
+    Firestore.prototype.runTransaction = async function runTransaction(fn) {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const snapVersion = store.version;
+        const snapData = { ...store.data };
+        let pendingWrite: Record<string, unknown> | undefined;
+        const result = await fn({
+          get: async () => {
+            arrivals += 1;
+            if (!firstWaveReleased && arrivals >= 2) {
+              firstWaveReleased = true;
+              releaseFirstWave();
+            }
+            if (!firstWaveReleased) {
+              await firstWave;
+            }
+            return {
+              exists: true,
+              data: () => ({ ...snapData }),
+            };
+          },
+          set: (_ref, mutation) => {
+            pendingWrite = mutation;
+          },
+        });
+        if (store.version !== snapVersion) {
+          continue;
+        }
+        if (pendingWrite) {
+          store.data = {
+            ...store.data,
+            ...(pendingWrite as {
+              status?: TranscriptDocument["status"];
+            }),
+          };
+          store.version += 1;
+        }
+        return result;
+      }
+      throw new Error("transaction retries exhausted");
+    };
+
+    const [first, second] = await Promise.all([
+      updateTranscriptStatus("video-1", "primary", "done", {
+        gcsPath: "gs://atmuri-yt-transcripts/normalized/video-1/primary.json",
+      }),
+      updateTranscriptStatus("video-1", "primary", "done", {
+        gcsPath: "gs://atmuri-yt-transcripts/normalized/video-1/primary.json",
+      }),
+    ]);
+
+    expect([first, second].sort()).toEqual([false, true]);
+    expect(store.data.status).toBe("done");
+    expect(store.version).toBe(1);
   });
 });

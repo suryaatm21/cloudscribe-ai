@@ -6,7 +6,7 @@ It began as a YouTube-style video hosting clone. That lineage is why some names 
 
 **What works today:** a signed-URL upload path, Pub/Sub-triggered transcoding, processed playback, and Firebase auth. That is Sprint 1, and it is deployed.
 
-**What it is aiming to be:** the same upload path, plus batch Speech-to-Text, generated notes, a retrieval index over the user's own material, and a citation-backed study chat. Sprint 2 (event-driven Speech-to-Text v2) is **merged and deployed** to Cloud Run, gated off (`ENABLE_TRANSCRIPTION=false` on revision `video-processing-service-00016-m9z`). Transcription buckets/topics have not been provisioned; `scripts/setup-transcription-infra.sh` has never been run. Sprints 3–6 exist as specs; Sprint 6 (live transcription) is a committed architectural direction, not a stretch goal — see [`docs/features/sprint-06-live-transcription.md`](docs/features/sprint-06-live-transcription.md).
+**What it is aiming to be:** the same upload path, plus batch Speech-to-Text, generated notes, a retrieval index over the user's own material, and a citation-backed study chat. Sprint 2 (event-driven Speech-to-Text v2) is **merged and deployed** to Cloud Run, gated off (`ENABLE_TRANSCRIPTION=false` on revision `video-processing-service-00016-m9z`). Transcription infrastructure (buckets, topics, push/DLQ subscriptions, prefix-filtered GCS notification, Cloud Scheduler job `reconcile-transcripts` every 15 minutes) **exists** in `yt-clone-385f4` and `scripts/setup-transcription-infra.sh` was verified idempotent. Transcription itself remains off: no Speech call has been made and no real Speech v2 output has been observed. The new buckets also carry GCP's default 7-day soft delete, which the script did not set. Sprints 3–6 exist as specs; Sprint 6 (live transcription) is a committed architectural direction, not a stretch goal — see [`docs/features/sprint-06-live-transcription.md`](docs/features/sprint-06-live-transcription.md).
 
 This is not a public video host, and it is not finished.
 
@@ -73,8 +73,8 @@ Two design constraints that matter for cost and correctness:
 | Service | Role | Status |
 | --- | --- | --- |
 | `yt-web-client` | Next.js UI. Cloud Run service name `cloudscribe-ai`. | Deployed |
-| `api-service` | Firebase Functions: signed upload URLs, video listing, scoped `getTranscriptUrl`. | Deployed (transcript callable is live in code; Speech path is gated off until infra exists) |
-| `video-processing-service` | Transcode worker + gated transcription worker. Internal ingress. | Sprint 1 + Sprint 2 **code deployed**; `ENABLE_TRANSCRIPTION=false` on revision `video-processing-service-00016-m9z`. Infra script never run. |
+| `api-service` | Firebase Functions: signed upload URLs, video listing, scoped `getTranscriptUrl`. | Deployed (`getTranscriptUrl` is live as Cloud Run service `gettranscripturl`; Speech path is gated off) |
+| `video-processing-service` | Transcode worker + gated transcription worker. Internal ingress. | Sprint 1 + Sprint 2 **code deployed**; `ENABLE_TRANSCRIPTION=false` on revision `video-processing-service-00016-m9z`. Infra exists and was verified idempotent; transcription remains gated. |
 | Notes service | Cloud Run worker: transcript → Gemini → notes in GCS + Firestore | Specified only (Sprint 3) |
 
 Later specified services (not started): Firestore `findNearest` indexer (Sprint 4), study chatbot (Sprint 5), live transcription (Sprint 6, committed direction).
@@ -86,7 +86,7 @@ Specs live under [`docs/features/`](docs/features/). Status below is operational
 | Sprint | Intent | Status |
 | --- | --- | --- |
 | **1** | Stabilize upload → Pub/Sub → transcode → Firestore | **Done and deployed.** Smoke path, health endpoint (internal), Cloud Build triggers, env docs. See [`docs/features/SPRINT-01-COMPLETION.md`](docs/features/SPRINT-01-COMPLETION.md). |
-| **2** | Batch Speech-to-Text v2, transcript GCS + Firestore, fetch API + watch UI | **Merged and deployed, gated off.** Event-driven v2 design. `ENABLE_TRANSCRIPTION` defaults **off** (Cloud Build `_ENABLE_TRANSCRIPTION="false"`). Infra script has never been run; no transcription buckets/topics exist. No real Speech v2 output file has been observed. |
+| **2** | Batch Speech-to-Text v2, transcript GCS + Firestore, fetch API + watch UI | **Merged and deployed, gated off.** Event-driven v2 design. `ENABLE_TRANSCRIPTION` defaults **off** (Cloud Build `_ENABLE_TRANSCRIPTION="false"`). Infra exists (verified idempotent). Cloud Scheduler `reconcile-transcripts` is ENABLED every 15 minutes. No Speech call has been made; no real Speech v2 output has been observed. |
 | **3** | Notes service on Vertex AI Gemini | **Specified only.** [`docs/features/sprint-03-notes.md`](docs/features/sprint-03-notes.md) |
 | **4** | Chunk + index into Firestore `findNearest` (exact KNN, no standing cost) with `text-embedding-005` at 768 dimensions | **Specified only.** [`docs/features/sprint-04-rag-indexing.md`](docs/features/sprint-04-rag-indexing.md) — Vertex AI RAG Engine / Vector Search was ruled out on standing cost. `gemini-embedding-001` defaults to 3072 dimensions, which exceeds Firestore's 2048 limit. |
 | **5** | Grounded study chatbot with citations | **Specified only.** [`docs/features/sprint-05-study-chatbot.md`](docs/features/sprint-05-study-chatbot.md) |
@@ -158,7 +158,7 @@ Each build: Docker image for `linux/amd64` → Artifact Registry → `gcloud run
 
 Functions are **not** on those triggers. Deploy them from `api-service` with `firebase deploy --only functions`.
 
-Sprint 2 code is already on `main` and on Cloud Run, with `ENABLE_TRANSCRIPTION` defaulting **off**. The flag is set explicitly via the Cloud Build substitution `_ENABLE_TRANSCRIPTION` (also `"false"` until infra exists). Transcription buckets/topics/subscriptions do not exist yet. Intended sequence: keep the flag off, run the infra script, deploy Functions, then flip `_ENABLE_TRANSCRIPTION=true`. Before that flip, set `_SPEECH_PROCESSING_STRATEGY=DYNAMIC_BATCHING` — the code default is `STANDARD` (5× the batch price) so test runs finish in minutes.
+Sprint 2 code is already on `main` and on Cloud Run, with `ENABLE_TRANSCRIPTION` defaulting **off**. The flag is set explicitly via the Cloud Build substitution `_ENABLE_TRANSCRIPTION` (also `"false"`). Transcription buckets, topics, subscriptions, the `raw/` GCS notification, and Cloud Scheduler `reconcile-transcripts` (every 15 minutes) **exist** and the setup script was verified idempotent. Remaining sequence: keep the flag off until the gated sweeper is deployed, set `_SPEECH_PROCESSING_STRATEGY=DYNAMIC_BATCHING` (the code default is `STANDARD`, 5× the batch price), then flip `_ENABLE_TRANSCRIPTION=true`. Transcription has not been exercised end to end — no Speech call has been made.
 
 Manual scripts (`video-processing-service/deploy.sh`, `yt-web-client/deploy.sh`) still exist; Cloud Build is the path that actually ships `main`.
 
@@ -174,7 +174,7 @@ Documented tradeoffs: [`docs/project-limitations.md`](docs/project-limitations.m
 - **No HLS/DASH, no CDN.** One `us-central1` bucket, one rendition.
 - **Video id is the object filename.** Fine for the clone; brittle for hyphenated UIDs and dotted names (Sprint 2 keeps main's safer filename parsing).
 - **`Video` TypeScript types are copy-pasted** across client, Functions, and worker.
-- **Sprint 2 still needs buckets, push subscriptions, DLQ subscriptions, a prefix-filtered notification, and a scheduler job** before the flag can turn on. The infra script has never been executed.
+- **Sprint 2 infra exists** (buckets, push/DLQ subscriptions, prefix-filtered notification, scheduler every 15 minutes) and was verified idempotent. `ENABLE_TRANSCRIPTION` stays **off**. No Speech call has been made. New buckets also have GCP's default 7-day soft delete (not set by the script). Flip the flag only after `_SPEECH_PROCESSING_STRATEGY=DYNAMIC_BATCHING` is set for lecture audio.
 
 ## Keep docs current
 

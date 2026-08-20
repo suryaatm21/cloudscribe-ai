@@ -524,6 +524,19 @@ app.post(
 app.post(
   "/reconcile-transcripts",
   async (_req: Request, res: Response): Promise<void> => {
+    if (!serviceConfig.enableTranscription) {
+      logger.info(
+        "Skipping transcript reconciliation; ENABLE_TRANSCRIPTION is false",
+        { component: "transcription" },
+      );
+      // Cloud Scheduler retries any non-2xx. Ack even when the flag is off.
+      res.status(200).json({
+        skipped: true,
+        reason: "transcription disabled",
+      });
+      return;
+    }
+
     const staleAfterMs = serviceConfig.reconcileStaleAfterMs;
     const now = Date.now();
     let processed = 0;
