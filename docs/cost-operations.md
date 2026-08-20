@@ -38,7 +38,7 @@ Policy file: `utils/artifact-registry-cleanup-policy.json`
 
 - Keep anything tagged `latest*`
 - Keep the 2 most recent versions per package
-- Delete untagged manifests
+- Delete untagged manifests older than 7 days
 - Delete tagged versions older than 14 days
 
 Keep policies win when a version matches both keep and delete. `latest` usually aliases the newest SHA, so unique retained digests are typically 2 per live package (current `latest` + one rollback). Bump `keepCount` to `3` if you want `latest` plus two additional SHA tags.
