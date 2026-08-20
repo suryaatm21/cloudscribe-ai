@@ -4,7 +4,7 @@
 
 ## Contract
 
-Chat retrieves lecture-content chunks (Sprint 4) and answers with citations. A citation must be able to point at **both** a video timestamp **and** an extracted frame when one exists. Transcript-only chunks still cite timestamps. Do not cite a frame that was not stored.
+Chat retrieves lecture-content chunks (Sprint 4) and answers with citations. A citation must be able to point at **both** a video timestamp **and** an extracted frame when one exists. Transcript-only chunks still cite timestamps. Visual-only chunks cite a frame and a timestamp and have no spoken quote. Do not cite a frame that was not stored.
 
 Identity is `videoId`. Downstream stays independent of whether the lecture-content was produced by batch upload or live capture. Design: [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
 
@@ -22,12 +22,12 @@ Expose a grounded Q&A experience in the web client that queries the RAG store an
 - Add rate limiting + quota enforcement per user to prevent abuse.
 - Update upload/job metadata to link lecture-content / notes / retrieval artifacts for quick lookups. Do not key anything on `lectureId`.
 - Instrument tracing/logging for questionId across chat + retrieval calls.
-- Frame URLs used in citations must not assume public GCS ACLs. Processed videos are already `makePublic()`; frames must not repeat that. There are **no Firestore security rules** in the repo today — citations that render frames raise the cost of that gap. See the privacy finding in [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
+- Frame URLs used in citations must not assume public GCS ACLs. Serve frames through short-lived signed URLs, same pattern as transcripts. Processed videos are already `makePublic()` because `atmuri-yt-processed-videos` does **not** have uniform bucket-level access; frames must not repeat that. Any frames bucket is created with uniform access so `makePublic()` fails rather than silently succeeding. There are **no Firestore security rules** in the repo today — citation UIs that read frame **metadata** (paths, timestamps, ownership) from Firestore still leak to any authenticated user until those rules exist. Object privacy and document privacy are separate controls. See the privacy finding in [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
 - SPIKE – Evaluate WebSocket vs long-polling for response streaming; document choice (MVP may use simple polling).
 
 ## Dependencies
 - RAG indexing pipeline producing searchable Firestore chunks from lecture-content.
-- Notes + lecture-content metadata accessible with workspace scoping. Transcript-only lecture-content is a valid corpus.
+- Notes + lecture-content metadata accessible with workspace scoping. Transcript-only and visual-only lecture-content are both valid corpora. Genuinely empty lectures are not.
 
 ## Success Metrics
 - Chatbot answers 5 curated questions with correct citations referencing user material (timestamps always; frames when the chunk has them).

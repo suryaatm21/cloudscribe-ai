@@ -28,7 +28,7 @@ For an already-recorded video the student should **upload the file** and use the
 
 Tab capture can take **tab audio** alongside video. That is cleaner lecture audio than a room microphone, so the live path may actually have **better transcription input** than the batch path (which transcribes whatever landed in the uploaded file).
 
-The live WebSocket ➜ `streamingRecognize` relay still exists for audio (see Transport). Visual frames from the same `getDisplayMedia` stream are a later producer of the same lecture-content `visuals` array. How those frames are uploaded during or after the session is not specified yet; do not assume they ride the Speech gRPC stream.
+The live WebSocket ➜ `streamingRecognize` relay still exists for audio (see Transport). Visual frames from the same `getDisplayMedia` stream are a later producer of the same lecture-content `visuals` array. How those frames are uploaded during or after the session is **not specified**; do not assume they ride the Speech gRPC stream. Visual-only assembly (a silent tab-share is a valid lecture if visuals land) does not fill that transport gap.
 
 ## Invariant to protect
 
@@ -38,7 +38,7 @@ Live becomes **another producer**, not a parallel pipeline. A live session write
 
 Identity stays `videoId`. Do not add a `lectureId`, a second notes path, a second indexer, or a second chat corpus keyed on transport.
 
-The previous invariant (“the transcript document is the contract”) is superseded. The transcript remains the authoritative **audio** representation inside the model.
+The previous invariant (“the transcript document is the contract”) is superseded. The transcript remains the authoritative **audio** representation inside the model. A live session with no detectable speech is still a valid lecture if it has usable visual content (same visual-only rule as batch). How live frames are uploaded is still unspecified.
 
 ## Transport
 
@@ -53,7 +53,7 @@ tab audio or microphone → WebSocket → CloudScribe service → gRPC streaming
 
 Interim captions and finals travel back on the same WebSocket. Auth tokens are issued before the socket opens; the relay never exposes a Google credential to the browser.
 
-For the scoped remote-lecture path, prefer **tab audio** from `getDisplayMedia` over the room microphone. The microphone path remains for audio-only in-person sessions.
+For the scoped remote-lecture path, prefer **tab audio** from `getDisplayMedia` over the room microphone. The microphone path remains for audio-only in-person sessions. Frame upload is not part of this relay; it remains an open question in [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
 
 ## Tension with the current runtime
 
@@ -78,7 +78,7 @@ Two approaches, both imperfect:
 | Re-summarize a growing window | Notes visibly rewrite themselves as the lecture continues | A model call per window |
 | Append-only per-chunk bullets | Notes are stable on screen | Cheap; lower quality than one pass over the finished lecture-content |
 
-Pick at implementation time with a prototype. Do not pretend live notes is “the same Gemini call on a stream.” Live notes consume the same lecture-content model as batch notes, including transcript-only fallback if live visual capture fails (user denied screen share, tab capture dropped, and so on).
+Pick at implementation time with a prototype. Do not pretend live notes is “the same Gemini call on a stream.” Live notes consume the same lecture-content model as batch notes: transcript-only fallback if live visual capture fails (user denied screen share, tab capture dropped), visual-only fallback if speech is absent and frames are usable, and an empty-lecture terminal if both are missing.
 
 ## Cost
 
@@ -95,7 +95,7 @@ This sprint is **specified only** and **deferred** until steps 1–6 of the mult
 ## Deliverables
 
 - Live transcription relay (WebSocket ➜ gRPC) emitting partial + final results (Acceptance: demo session shows interim captions updating within 2s; final transcript stored in Firestore + GCS in the same schema as batch, `source: "live"`).
-- Screen capture via `getDisplayMedia` for the remote-lecture path (Acceptance: tab share produces stored frames with timestamps; denying screen share still completes an audio-only lecture-content document).
+- Screen capture via `getDisplayMedia` for the remote-lecture path (Acceptance: tab share produces stored frames with timestamps; denying screen share still completes an audio-only lecture-content document; a silent tab-share with usable frames still completes visual-only lecture-content rather than failing).
 - Web client live lecture UI with start/stop, connection state, captions, and an explicit screen-share gesture (Acceptance: UI reconnects on transient failure; does not request persistent capture; prefers tab share over entire screen).
 - Post-session commit of the final lecture-content document into the standard pipeline, triggering notes + indexing (Acceptance: completion enqueues notes + retrieval jobs within 1 minute using the lecture-content contract, not a live-only fork).
 
@@ -113,7 +113,7 @@ This sprint is **specified only** and **deferred** until steps 1–6 of the mult
 
 ## Dependencies
 
-- Batch visual handling (keyframes, OCR, descriptions, transcript-only assembly fallback) already in place so live is “another producer,” not the first visual pipeline.
+- Batch visual handling (keyframes, OCR, descriptions, transcript-only **and** visual-only assembly fallbacks) already in place so live is “another producer,” not the first visual pipeline.
 - Chatbot + retrieval pipelines operational (live lecture-content feeds the **same** storage/indexing paths).
 - Speech-to-Text v2 streaming quotas enabled and service accounts granted.
 - Transcript document `source` discriminator already on batch writes (done in the Sprint 2 enabled-path work).
@@ -124,6 +124,7 @@ This sprint is **specified only** and **deferred** until steps 1–6 of the mult
 - Interim captions visible to the user within 2 seconds of speech for 95% of utterances.
 - Final lecture-content available for notes generation automatically, indistinguishable downstream from a batch document except for `source: "live"`.
 - A session that never received screen-share permission still produces transcript-only lecture-content rather than failing the lecture.
+- A session that received screen share but no usable speech still produces visual-only lecture-content rather than failing the lecture, once frame transport exists.
 
 ## Deferred Complexity
 

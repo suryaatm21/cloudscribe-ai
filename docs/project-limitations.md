@@ -36,9 +36,11 @@
 
 ## Firestore Rules And Frame Privacy
 
-- **Current:** the repo has **no Firestore security rules**. Processed playback objects are `makePublic()`. Owner-only rules and signed video URLs are a planned security pass, not done.
-- **Tradeoff:** that gap is already real for video metadata. Extracted lecture frames (specified, not built) are a different risk class than transcripts: images of course material, potentially copyrighted, potentially containing other students’ faces. A leaked frame URL is a still of the lecture.
-- **Potential Solutions:** ship owner-only Firestore rules and non-public frame objects **before** storing frames. See the privacy finding in [`docs/features/multimodal-lecture-content.md`](features/multimodal-lecture-content.md).
+- **Current:** the repo has **no Firestore security rules**. Processed playback objects are `makePublic()`. Owner-only rules and signed video URLs are a planned security pass, not done. `atmuri-yt-raw-videos` and `atmuri-yt-processed-videos` do **not** have uniform bucket-level access, which is why `makePublic()` on processed videos works today.
+- **Decided (parallel tracks):** frame extraction may proceed while that security pass is still in flight. Frames are never publicly readable. Any frames bucket **must** be created with uniform bucket-level access — the same flag used for `atmuri-yt-transcripts` and `atmuri-yt-audio-work` in [`scripts/setup-transcription-infra.sh`](../scripts/setup-transcription-infra.sh) — so per-object ACLs are unavailable and `makePublic()` **fails** rather than silently succeeding. That requirement is a precondition of storing the first frame, not a follow-up. Frames are served only through short-lived signed URLs, following the transcript pattern.
+- **Residual risk:** uniform access solves object privacy. It does not solve document privacy. Until Firestore rules exist, frame **metadata** (paths, timestamps, ownership) is readable by any authenticated user. Those are separate controls; only the object-ACL class is being made impossible by construction in parallel with extraction.
+- **Tradeoff:** extracted lecture frames (specified, not built) are a different risk class than transcripts: images of course material, potentially copyrighted, potentially containing other students’ faces. A leaked frame URL is a still of the lecture. A leaked Firestore path is still a leak of what was stored, even if the JPEG itself is private.
+- **Potential Solutions:** keep the frames bucket on uniform access from birth; ship owner-only Firestore rules and signed video URLs on the security branch without blocking step-3 frame storage on that branch landing. See the privacy finding in [`docs/features/multimodal-lecture-content.md`](features/multimodal-lecture-content.md).
 
 ## Video ID/Processing Strategy
 

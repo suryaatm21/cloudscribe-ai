@@ -38,7 +38,7 @@ The worker URL `https://video-processing-service-rfrkdig5jq-uc.a.run.app` is rea
 
 Sprint 2 does **not** add a fourth running service. Transcription is inside `video-processing-service` as an event-driven Speech-to-Text v2 pipeline: `batchRecognize` writes JSON under a `raw/` prefix, a prefix-filtered bucket notification completes the job, and a scheduler sweeper records failures. Processing strategy is configurable via `SPEECH_PROCESSING_STRATEGY` (Cloud Build `_SPEECH_PROCESSING_STRATEGY`). The **deployed/test default is `STANDARD`** (Speech `PROCESSING_STRATEGY_UNSPECIFIED`: process as soon as received, ~$0.016/min, minutes-scale). **`DYNAMIC_BATCHING`** is ~5× cheaper (~$0.003/min) with a 24-hour fulfillment ceiling — required for production launch, unusable while iterating. There is no synchronous polling; Pub/Sub's ack deadline is 600s and cannot cover a long Speech job.
 
-**Invariant:** all downstream consumers depend on the normalized **lecture-content model** and remain independent of the audio or visual producer that created each artifact. The transcript remains the authoritative audio representation and one modality inside that model; it is not the document that notes, indexing, and chat consume once the model exists. Identity stays `videoId` (not a parallel `lectureId`); `source` stays `"batch" | "live"`. Design: [`docs/features/multimodal-lecture-content.md`](docs/features/multimodal-lecture-content.md).
+**Invariant:** all downstream consumers depend on the normalized **lecture-content model** and remain independent of the audio or visual producer that created each artifact. The transcript remains the authoritative audio representation and one modality inside that model; it is not the document that notes, indexing, and chat consume once the model exists. A lecture with no detectable speech is still valid if it has usable visuals. Identity stays `videoId` (not a parallel `lectureId`); `source` stays `"batch" | "live"`. Design: [`docs/features/multimodal-lecture-content.md`](docs/features/multimodal-lecture-content.md).
 
 Live capture (Sprint 6) is another producer of that same model. It is **deferred** until batch visual handling exists. Its visual source is screen capture (`getDisplayMedia`), scoped to synchronous remote lectures, not a phone aimed at a projector. See [`docs/features/sprint-06-live-transcription.md`](docs/features/sprint-06-live-transcription.md).
 
@@ -77,9 +77,11 @@ flowchart TD
   Processed -.-> VisualJob[visual-analysis-jobs]
   AudioJob --> Speech["Speech-to-Text v2"]
   Speech --> Transcript["normalized transcript"]
+  Speech --> Silent["no_audio_detected"]
   VisualJob -.-> Frames["scene detect, sample floor, hash dedup"]
   Frames -.-> OcrDesc["OCR plus descriptions"]
   Transcript -.-> Assembler["timeline alignment"]
+  Silent -.-> Assembler
   OcrDesc -.-> Assembler
   Assembler -.-> ReadyEvent["lecture-content-ready"]
   ReadyEvent -.-> Notes[notes]
@@ -87,7 +89,7 @@ flowchart TD
   Retrieval -.-> Chat["grounded chat"]
 ```
 
-Sprint 3 adds a dedicated **notes service** that consumes lecture-content (transcript-only first, transcript-only as the permanent visual-failure fallback). Sprint 4 indexes into Firestore `findNearest` (not Vertex AI RAG Engine). Sprint 5 is grounded chat with citations to timestamps and frames. Sprint 6 is live capture as another producer of the same lecture-content model, deferred.
+Sprint 3 adds a dedicated **notes service** that consumes lecture-content (transcript-only first; transcript-only as the permanent visual-failure fallback; visual-only as the permanent silent-lecture fallback). Sprint 4 indexes into Firestore `findNearest` (not Vertex AI RAG Engine). Sprint 5 is grounded chat with citations to timestamps and frames. Sprint 6 is live capture as another producer of the same lecture-content model, deferred.
 
 Two design constraints that matter for cost and correctness, plus one that now also matters for OCR:
 
@@ -102,7 +104,7 @@ Two design constraints that matter for cost and correctness, plus one that now a
 | `yt-web-client` | Next.js UI. Cloud Run service name `cloudscribe-ai`. | Deployed |
 | `api-service` | Firebase Functions: signed upload URLs, video listing, scoped `getTranscriptUrl`. | Deployed (`getTranscriptUrl` is live as Cloud Run service `gettranscripturl`; Speech path is gated off) |
 | `video-processing-service` | Transcode worker + gated transcription worker. Internal ingress. | Sprint 1 + Sprint 2 **code deployed**; `ENABLE_TRANSCRIPTION=false` on revision `video-processing-service-00016-m9z`. Infra exists and was verified idempotent; transcription remains gated. |
-| Notes service | Cloud Run worker: lecture-content → Gemini → notes in GCS + Firestore (transcript-only first and on visual failure) | Specified only (Sprint 3) |
+| Notes service | Cloud Run worker: lecture-content → Gemini → notes in GCS + Firestore (transcript-only first; transcript-only on visual failure; visual-only on silent lectures) | Specified only (Sprint 3) |
 
 Later specified services (not started): Firestore `findNearest` indexer (Sprint 4), study chatbot (Sprint 5), live capture (Sprint 6, committed direction, deferred until visual handling exists). Visual analysis and lecture-content assembly are part of the multimodal design, not a separate running service today.
 
@@ -114,7 +116,7 @@ Specs live under [`docs/features/`](docs/features/). Status below is operational
 | --- | --- | --- |
 | **1** | Stabilize upload → Pub/Sub → transcode → Firestore | **Done and deployed.** Smoke path, health endpoint (internal), Cloud Build triggers, env docs. See [`docs/features/SPRINT-01-COMPLETION.md`](docs/features/SPRINT-01-COMPLETION.md). |
 | **2** | Batch Speech-to-Text v2, transcript GCS + Firestore, fetch API + watch UI | **Merged and deployed, gated off.** Event-driven v2 design. `ENABLE_TRANSCRIPTION` defaults **off** (Cloud Build `_ENABLE_TRANSCRIPTION="false"`). Infra exists (verified idempotent). Cloud Scheduler `reconcile-transcripts` is ENABLED every 15 minutes. No Speech call has been made; no real Speech v2 output has been observed. |
-| **3** | Notes from the lecture-content model (transcript-only first; visual failure falls back to transcript-only) | **Specified only.** [`docs/features/sprint-03-notes.md`](docs/features/sprint-03-notes.md) |
+| **3** | Notes from the lecture-content model (transcript-only first; visual failure falls back to transcript-only; silent lectures fall back to visual-only) | **Specified only.** [`docs/features/sprint-03-notes.md`](docs/features/sprint-03-notes.md) |
 | **4** | Chunk + index into Firestore `findNearest` (exact KNN, no standing cost) with `text-embedding-005` at 768 dimensions; chunks include transcript, OCR, descriptions, timestamps, frame refs | **Specified only.** [`docs/features/sprint-04-rag-indexing.md`](docs/features/sprint-04-rag-indexing.md) — Vertex AI RAG Engine / Vector Search was ruled out on standing cost. `gemini-embedding-001` defaults to 3072 dimensions, which exceeds Firestore's 2048 limit. Native image embeddings are deferred. |
 | **5** | Grounded study chatbot with citations to timestamps **and** extracted frames | **Specified only.** [`docs/features/sprint-05-study-chatbot.md`](docs/features/sprint-05-study-chatbot.md) |
 | **6** | Live capture via screen share (`getDisplayMedia`) for synchronous remote lectures; audio-only mic for in-person; same lecture-content model | **Specified only; deferred** until batch visual handling exists. [`docs/features/sprint-06-live-transcription.md`](docs/features/sprint-06-live-transcription.md) |
@@ -197,7 +199,7 @@ Documented tradeoffs: [`docs/project-limitations.md`](docs/project-limitations.m
 
 - **`/health` is not externally reachable.** Ingress is internal. Cloud Run's own startup probe (TCP on 8080) is what keeps the revision up. External Monitoring uptime checks against the `.run.app` host will look like an outage. [`docs/monitoring-setup.md`](docs/monitoring-setup.md) used to recommend that; it now flags the contradiction.
 - **Pub/Sub ack is 600s.** A transcode that runs longer can be redelivered. Firestore status gating reduces duplicates; it does not eliminate the race.
-- **Processed videos are public GCS objects** (`makePublic()`). Playback works; object ACLs do not. There are **no Firestore security rules** in the repo. Signed video URLs and owner-only Firestore rules are a planned security pass, not done. Stored lecture frames (specified, not built) are a higher-stakes leak than transcript text — see [`docs/features/multimodal-lecture-content.md`](docs/features/multimodal-lecture-content.md).
+- **Processed videos are public GCS objects** (`makePublic()`). Playback works; object ACLs do not, because `atmuri-yt-processed-videos` (and `atmuri-yt-raw-videos`) do **not** have uniform bucket-level access. There are **no Firestore security rules** in the repo. Signed video URLs and owner-only Firestore rules are a planned security pass, not done. Stored lecture frames (specified, not built) must never be public: any frames bucket is created with uniform access so `makePublic()` fails, matching `atmuri-yt-transcripts` / `atmuri-yt-audio-work`. Frame **metadata** in Firestore remains readable by any authenticated user until rules exist. Frame storage may begin before that security pass completes; uniform access is the precondition of the first frame, not a follow-up. See [`docs/features/multimodal-lecture-content.md`](docs/features/multimodal-lecture-content.md).
 - **Original-resolution transcode is load-bearing for OCR.** Sprint 2 dropped the 360p downscale. Putting it back would degrade slide/equation OCR with no pipeline error. [`docs/project-limitations.md`](docs/project-limitations.md).
 - **`allUsers` can still invoke the worker** in addition to the Pub/Sub service account. Combined with internal ingress this is less exposed than a public URL, but it is not least-privilege.
 - **Raw uploads are never deleted** in GCS (`deleteRawVideo` removes the local temp file only).
