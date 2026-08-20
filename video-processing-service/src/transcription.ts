@@ -1,5 +1,5 @@
 import { v2 } from "@google-cloud/speech";
-import { serviceConfig } from "./config";
+import { serviceConfig, speechApiProcessingStrategy } from "./config";
 import { getStorageClient } from "./storage";
 import { logger } from "./logger";
 
@@ -89,6 +89,46 @@ export class SpeechJobStartError extends Error {
     this.name = "SpeechJobStartError";
     this.certainty = certainty;
   }
+}
+
+/**
+ * Malformed Speech JSON / schema will never become valid on retry.
+ * Callers must ack Pub/Sub (200) and mark the transcript failed.
+ */
+export class PermanentTranscriptParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PermanentTranscriptParseError";
+  }
+}
+
+/**
+ * Well-formed Speech result with zero usable speech segments.
+ * Callers must mark the transcript `no_audio_detected`, not `failed`.
+ */
+export class NoAudioDetectedError extends Error {
+  constructor(
+    message = "Speech v2 result contained no usable speech segments",
+  ) {
+    super(message);
+    this.name = "NoAudioDetectedError";
+  }
+}
+
+export function isPermanentTranscriptParseError(
+  error: unknown,
+): error is PermanentTranscriptParseError {
+  return error instanceof PermanentTranscriptParseError;
+}
+
+export function isNoAudioDetectedError(
+  error: unknown,
+): error is NoAudioDetectedError {
+  return error instanceof NoAudioDetectedError;
+}
+
+function throwPermanentParse(message: string): never {
+  throw new PermanentTranscriptParseError(message);
 }
 
 /**
@@ -292,7 +332,9 @@ export async function startTranscriptionJob(
     recognitionOutputConfig: {
       gcsOutputConfig: { uri: outputUri },
     },
-    processingStrategy: "DYNAMIC_BATCHING" as const,
+    processingStrategy: speechApiProcessingStrategy(
+      serviceConfig.speechProcessingStrategy,
+    ),
   };
 
   try {
@@ -409,11 +451,9 @@ export function buildTranscriptPayload(
 
   results.forEach((result, index) => {
     const alternative = firstAlternative(result, index);
-    const text = stringField(alternative, "transcript")?.trim() ?? "";
+    const text = speechTranscriptText(alternative, index);
     if (!text) {
-      throw new Error(
-        `Unexpected Speech v2 result JSON: results[${index}] is missing transcript text`,
-      );
+      return;
     }
 
     const words = asArray(readField(alternative, "words"));
@@ -426,7 +466,7 @@ export function buildTranscriptPayload(
       ) ??
       durationToSeconds(readField(result, "resultEndOffset", "result_end_offset"));
     if (startTime === undefined || endTime === undefined) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 result JSON: results[${index}] is missing timing`,
       );
     }
@@ -442,9 +482,7 @@ export function buildTranscriptPayload(
   });
 
   if (segments.length === 0) {
-    throw new Error(
-      "Speech v2 result contained no usable segments; refusing to persist an empty transcript",
-    );
+    throw new NoAudioDetectedError();
   }
 
   logger.info("Built transcript payload from Speech v2 JSON", {
@@ -476,7 +514,7 @@ export async function downloadSpeechResultJson(
   try {
     parsed = JSON.parse(contents.toString("utf8"));
   } catch {
-    throw new Error(
+    throwPermanentParse(
       `Speech v2 result at gs://${bucketName}/${objectName} is not valid JSON`,
     );
   }
@@ -560,21 +598,21 @@ function outputUriFromFileResult(file: unknown): string | undefined {
 
 function extractSpeechV2Results(parsed: unknown): Record<string, unknown>[] {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(
+    throwPermanentParse(
       `Unexpected Speech v2 result JSON: expected an object, got ${describeType(parsed)}`,
     );
   }
 
   const results = readField(parsed, "results");
   if (!Array.isArray(results)) {
-    throw new Error(
+    throwPermanentParse(
       "Unexpected Speech v2 result JSON: missing results[] (BatchRecognizeResults)",
     );
   }
 
   return results.map((result, index) => {
     if (result === null || typeof result !== "object" || Array.isArray(result)) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 result JSON: results[${index}] is not an object`,
       );
     }
@@ -589,12 +627,12 @@ function firstAlternative(
   const alternatives = asArray(readField(result, "alternatives"));
   const first = alternatives[0];
   if (first === undefined) {
-    throw new Error(
+    throwPermanentParse(
       `Unexpected Speech v2 result JSON: results[${index}] has no alternatives`,
     );
   }
   if (first === null || typeof first !== "object" || Array.isArray(first)) {
-    throw new Error(
+    throwPermanentParse(
       `Unexpected Speech v2 result JSON: results[${index}].alternatives[0] is not an object`,
     );
   }
@@ -614,27 +652,29 @@ export function durationToSeconds(value: unknown): number | undefined {
   if (typeof value === "string") {
     const match = value.trim().match(/^(-?\d+(?:\.\d+)?)s$/);
     if (!match) {
-      throw new Error(`Unexpected Speech v2 duration string: ${value}`);
+      throwPermanentParse(`Unexpected Speech v2 duration string: ${value}`);
     }
     return Number(match[1]);
   }
   if (typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
     if (!("seconds" in record) && !("nanos" in record)) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 duration object: ${JSON.stringify(value)}`,
       );
     }
     const seconds = Number(record.seconds ?? 0);
     const nanos = Number(record.nanos ?? 0);
     if (!Number.isFinite(seconds) || !Number.isFinite(nanos)) {
-      throw new Error(
+      throwPermanentParse(
         `Unexpected Speech v2 duration object: ${JSON.stringify(value)}`,
       );
     }
     return seconds + nanos / 1_000_000_000;
   }
-  throw new Error(`Unexpected Speech v2 duration value: ${describeType(value)}`);
+  throwPermanentParse(
+    `Unexpected Speech v2 duration value: ${describeType(value)}`,
+  );
 }
 
 function readField(
@@ -655,13 +695,25 @@ function readField(
   return undefined;
 }
 
-function stringField(
-  source: Record<string, unknown>,
-  camel: string,
-  snake?: string,
-): string | undefined {
-  const value = readField(source, camel, snake);
-  return typeof value === "string" ? value : undefined;
+/**
+ * Speech `transcript` is a string when present. Absent, empty, and
+ * whitespace-only values mean no usable speech in that result. A present
+ * non-string is malformed output and must not be coerced to silence.
+ */
+function speechTranscriptText(
+  alternative: Record<string, unknown>,
+  resultIndex: number,
+): string {
+  const value = readField(alternative, "transcript");
+  if (value === undefined) {
+    return "";
+  }
+  if (typeof value !== "string") {
+    throwPermanentParse(
+      `Unexpected Speech v2 result JSON: results[${resultIndex}].alternatives[0].transcript is not a string`,
+    );
+  }
+  return value.trim();
 }
 
 function numberField(

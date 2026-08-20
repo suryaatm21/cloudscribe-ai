@@ -8,21 +8,22 @@
     }
   },
   {
-    "name": "keep-two-recent-versions",
+    "name": "keep-recent-versions",
     "action": {"type": "Keep"},
     "mostRecentVersions": {
       "keepCount": 2
     }
   },
   {
-    "name": "delete-untagged-manifests",
+    "name": "delete-untagged-older-than-7d",
     "action": {"type": "Delete"},
     "condition": {
-      "tagState": "untagged"
+      "tagState": "untagged",
+      "olderThan": "7d"
     }
   },
   {
-    "name": "delete-tags-older-than-14d",
+    "name": "delete-tagged-older-than-14d",
     "action": {"type": "Delete"},
     "condition": {
       "tagState": "tagged",

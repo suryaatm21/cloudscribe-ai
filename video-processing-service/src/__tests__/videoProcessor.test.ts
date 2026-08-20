@@ -109,6 +109,7 @@ describe("processVideo", () => {
       "primary",
       expect.objectContaining({
         status: "pending",
+        source: "batch",
         audioGcsUri: "gs://atmuri-yt-audio-work/user123-1762753390224.flac",
         userId,
         language: "en-US",

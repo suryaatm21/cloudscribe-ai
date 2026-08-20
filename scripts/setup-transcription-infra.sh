@@ -41,7 +41,8 @@ gcloud can configure OIDC push authentication.
 
 --functions-service-account is the Firebase gen2 Functions identity that
 signs transcript URLs. If omitted, the script describes gettranscripturl,
-then getvideos, in --region.
+then getvideos, in --region. If that lookup fails, the script exits and
+requires this flag; it does not guess the Compute Engine default SA.
 
 Example:
   ./scripts/setup-transcription-infra.sh \
@@ -224,12 +225,40 @@ function subscription_exists() {
     --format="value(name)" | grep -q "/subscriptions/${subscription}$"
 }
 
+function canonical_pubsub_name() {
+  local value="$1"
+  printf '%s' "${value#//pubsub.googleapis.com/}"
+}
+
+function expected_topic_resource() {
+  printf 'projects/%s/topics/%s' "$PROJECT_ID" "$1"
+}
+
+# A subscription's topic is immutable. Updating would otherwise ignore $topic
+# and silently keep a binding to the wrong topic.
+function assert_subscription_topic() {
+  local subscription="$1"
+  local topic="$2"
+  local existing expected normalized
+  existing="$(gcloud pubsub subscriptions describe "$subscription" \
+    --project "$PROJECT_ID" \
+    --format='value(topic)')"
+  expected="$(expected_topic_resource "$topic")"
+  normalized="$(canonical_pubsub_name "$existing")"
+  if [[ -z "$existing" || "$normalized" != "$expected" ]]; then
+    echo "ERROR: subscription ${subscription} is bound to ${existing:-<empty>}, expected ${expected}."
+    echo "Pub/Sub cannot change a subscription's topic. Delete ${subscription} and rerun this script."
+    exit 1
+  fi
+}
+
 function ensure_push_subscription() {
   local subscription="$1"
   local topic="$2"
   local endpoint="$3"
   local dlq_topic="$4"
   if subscription_exists "$subscription"; then
+    assert_subscription_topic "$subscription" "$topic"
     echo "Updating push subscription ${subscription} -> ${endpoint}..."
     gcloud pubsub subscriptions update "$subscription" \
       --push-endpoint "$endpoint" \
@@ -239,6 +268,7 @@ function ensure_push_subscription() {
       --min-retry-delay 10 \
       --max-retry-delay 600 \
       --message-retention-duration "${LIFECYCLE_DAYS}d" \
+      --expiration-period=never \
       --dead-letter-topic "$dlq_topic" \
       --max-delivery-attempts "$DLQ_MAX_DELIVERY" \
       --project "$PROJECT_ID"
@@ -253,6 +283,7 @@ function ensure_push_subscription() {
       --min-retry-delay 10 \
       --max-retry-delay 600 \
       --message-retention-duration "${LIFECYCLE_DAYS}d" \
+      --expiration-period=never \
       --dead-letter-topic "$dlq_topic" \
       --max-delivery-attempts "$DLQ_MAX_DELIVERY" \
       --project "$PROJECT_ID"
@@ -263,17 +294,34 @@ function ensure_pull_subscription() {
   local subscription="$1"
   local topic="$2"
   if subscription_exists "$subscription"; then
-    echo "Updating pull subscription ${subscription}..."
-    gcloud pubsub subscriptions update "$subscription" \
-      --ack-deadline 60 \
-      --message-retention-duration "${LIFECYCLE_DAYS}d" \
-      --project "$PROJECT_ID"
+    assert_subscription_topic "$subscription" "$topic"
+    local push_endpoint
+    push_endpoint="$(gcloud pubsub subscriptions describe "$subscription" \
+      --project "$PROJECT_ID" \
+      --format='value(pushConfig.pushEndpoint)')"
+    if [[ -n "$push_endpoint" ]]; then
+      echo "Subscription ${subscription} is PUSH (${push_endpoint}); converting to PULL."
+      gcloud pubsub subscriptions update "$subscription" \
+        --push-endpoint="" \
+        --ack-deadline 60 \
+        --message-retention-duration "${LIFECYCLE_DAYS}d" \
+        --expiration-period=never \
+        --project "$PROJECT_ID"
+    else
+      echo "Updating pull subscription ${subscription}..."
+      gcloud pubsub subscriptions update "$subscription" \
+        --ack-deadline 60 \
+        --message-retention-duration "${LIFECYCLE_DAYS}d" \
+        --expiration-period=never \
+        --project "$PROJECT_ID"
+    fi
   else
     echo "Creating pull subscription ${subscription}..."
     gcloud pubsub subscriptions create "$subscription" \
       --topic "$topic" \
       --ack-deadline 60 \
       --message-retention-duration "${LIFECYCLE_DAYS}d" \
+      --expiration-period=never \
       --project "$PROJECT_ID"
   fi
 }
@@ -311,8 +359,17 @@ function preflight_act_as() {
     rm -f "$tmp"
     return 0
   fi
-  allowed="$(jq -r '.permissions // [] | join(",")' "$tmp")"
+  local jq_ec
+  set +e
+  allowed="$(jq -r '.permissions // [] | join(",")' "$tmp" 2>/dev/null)"
+  jq_ec=$?
+  set -e
   rm -f "$tmp"
+  if [[ "$jq_ec" -ne 0 ]]; then
+    echo "WARNING: actAs preflight returned HTTP 200 but the body was not parseable JSON; continuing."
+    echo "OIDC subscription/scheduler create will fail loudly if actAs is missing."
+    return 0
+  fi
   if [[ "$allowed" != *"iam.serviceAccounts.actAs"* ]]; then
     echo "ERROR: current credentials lack iam.serviceAccounts.actAs on ${PUSH_IDENTITY}."
     echo "OIDC push subscriptions and Cloud Scheduler require this permission."
@@ -345,34 +402,48 @@ function resolve_runtime_service_account() {
   fi
 }
 
-function describe_run_service_account() {
-  local name="$1"
-  gcloud run services describe "$name" \
-    --region "$REGION" \
-    --project "$PROJECT_ID" \
-    --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null || true
-}
-
 # getTranscriptUrl is a gen2 callable and signs GCS URLs as the Functions
 # runtime identity, which is not necessarily the video-processor SA.
+# Do not suppress describe errors or guess the Compute Engine default SA:
+# a failed lookup must not grant objectViewer to the wrong identity.
 function resolve_functions_service_account() {
   if [[ -n "$FUNCTIONS_SERVICE_ACCOUNT" ]]; then
     echo "Using Functions service account ${FUNCTIONS_SERVICE_ACCOUNT}."
     return
   fi
-  local svc sa
+  local deployed list_ec svc sa
+  set +e
+  deployed="$(gcloud run services list \
+    --region "$REGION" \
+    --project "$PROJECT_ID" \
+    --format='value(metadata.name)')"
+  list_ec=$?
+  set -e
+  if [[ "$list_ec" -ne 0 ]]; then
+    echo "ERROR: failed to list Cloud Run services in ${REGION} while resolving the Functions identity."
+    echo "Pass --functions-service-account <email> instead of letting the script guess."
+    exit 1
+  fi
   for svc in gettranscripturl getvideos generateuploadurl getuploadurl; do
-    sa="$(describe_run_service_account "$svc")"
-    if [[ -n "$sa" ]]; then
-      FUNCTIONS_SERVICE_ACCOUNT="$sa"
-      echo "Functions runtime service account from ${svc}: ${FUNCTIONS_SERVICE_ACCOUNT}."
-      return
+    if ! grep -Fxq "$svc" <<<"$deployed"; then
+      continue
     fi
+    sa="$(gcloud run services describe "$svc" \
+      --region "$REGION" \
+      --project "$PROJECT_ID" \
+      --format='value(spec.template.spec.serviceAccountName)')"
+    if [[ -z "$sa" ]]; then
+      echo "ERROR: Cloud Run service ${svc} exists but has no serviceAccountName."
+      echo "Pass --functions-service-account <email> instead of guessing."
+      exit 1
+    fi
+    FUNCTIONS_SERVICE_ACCOUNT="$sa"
+    echo "Functions runtime service account from ${svc}: ${FUNCTIONS_SERVICE_ACCOUNT}."
+    return
   done
-  local project_number
-  project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-  FUNCTIONS_SERVICE_ACCOUNT="${project_number}-compute@developer.gserviceaccount.com"
-  echo "No deployed gen2 functions found; defaulting Functions SA to ${FUNCTIONS_SERVICE_ACCOUNT}."
+  echo "ERROR: none of gettranscripturl, getvideos, generateuploadurl, or getuploadurl are deployed in ${REGION}."
+  echo "Pass --functions-service-account <email> instead of guessing the Compute Engine default SA."
+  exit 1
 }
 
 echo "===> Enabling required APIs..."
@@ -460,6 +531,12 @@ gcloud storage buckets add-iam-policy-binding "gs://${AUDIO_WORK_BUCKET_NAME}" \
 # objectViewer is enough to mint a read URL. Grant it even when that identity
 # currently coincides with the Cloud Run runtime SA (objectAdmin), so a later
 # split of the two accounts does not break signing.
+#
+# This binding is pinned to FUNCTIONS_SERVICE_ACCOUNT from THIS run. It does
+# not automatically follow a later identity split: if getTranscriptUrl is
+# redeployed with a different service account, rerun this script (or pass
+# --functions-service-account) so the new identity receives objectViewer and
+# TokenCreator. The previous identity keeps its binding until removed by hand.
 gcloud storage buckets add-iam-policy-binding "gs://${TRANSCRIPTS_BUCKET_NAME}" \
   --member "serviceAccount:${FUNCTIONS_SERVICE_ACCOUNT}" \
   --role "roles/storage.objectViewer" >/dev/null
@@ -513,20 +590,19 @@ EXISTING_NOTIFICATIONS="$(
     --format=json \
     --project "$PROJECT_ID"
 )"
-if jq -e --arg topic "$READY_TOPIC" --arg prefix "$RAW_OBJECT_PREFIX" '
+if jq -e --arg topic "$(expected_topic_resource "$READY_TOPIC")" --arg prefix "$RAW_OBJECT_PREFIX" '
   def cfg:
     if type == "object" and has("Notification Configuration")
     then .["Notification Configuration"]
     else . end;
+  def canonical_topic:
+    tostring
+    | ltrimstr("//pubsub.googleapis.com/");
   (if type == "array" then . else [.] end)
   | map(cfg)
   | any(
-      ((.topic // "") | tostring) as $t
-      | (
-          ($t | endswith("/topics/" + $topic))
-          or ($t == $topic)
-        )
-        and ((.object_name_prefix // "") == $prefix)
+      ((.topic // "") | canonical_topic) == $topic
+      and ((.object_name_prefix // "") == $prefix)
     )
 ' <<<"$EXISTING_NOTIFICATIONS" >/dev/null; then
   echo "GCS notification on ${RAW_OBJECT_PREFIX} -> ${READY_TOPIC} already exists."

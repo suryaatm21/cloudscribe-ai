@@ -39,7 +39,14 @@ export interface Video {
 }
 
 interface TranscriptDoc {
-  status?: "pending" | "running" | "failed" | "done" | "needs_review";
+  status?:
+    | "pending"
+    | "running"
+    | "failed"
+    | "done"
+    | "needs_review"
+    | "no_audio_detected";
+  source?: "batch" | "live";
   gcsPath?: string;
   language?: string;
   model?: string;
@@ -211,6 +218,12 @@ export const getTranscriptUrl = onCall(
     }
 
     const transcript = transcriptSnapshot.data() as TranscriptDoc;
+    if (transcript.status === "no_audio_detected") {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "No speech detected in this video",
+      );
+    }
     if (transcript.status !== "done" || !transcript.gcsPath) {
       throw new functions.https.HttpsError(
         "failed-precondition",

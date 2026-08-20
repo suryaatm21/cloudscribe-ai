@@ -20,7 +20,13 @@ import styles from "./watch.module.css";
 
 interface TranscriptMeta {
   id: string;
-  status?: "pending" | "running" | "failed" | "done" | "needs_review";
+  status?:
+    | "pending"
+    | "running"
+    | "failed"
+    | "done"
+    | "needs_review"
+    | "no_audio_detected";
   segmentCount?: number;
   durationSeconds?: number;
 }
@@ -155,6 +161,8 @@ function WatchContent() {
         return "Transcription needs review";
       case "done":
         return "Transcript ready";
+      case "no_audio_detected":
+        return "No speech detected in this video";
       default:
         return "Transcription status unknown";
     }
@@ -194,7 +202,14 @@ function WatchContent() {
             Transcription failed. Please retry the upload.
           </p>
         )}
-        {transcriptMeta?.status !== "done" && !transcriptError && (
+        {transcriptMeta?.status === "no_audio_detected" && (
+          <p className={styles.muted}>
+            No speech detected in this video
+          </p>
+        )}
+        {transcriptMeta?.status !== "done" &&
+          transcriptMeta?.status !== "no_audio_detected" &&
+          !transcriptError && (
           <p className={styles.muted}>
             Transcript will appear here once processing finishes.
           </p>

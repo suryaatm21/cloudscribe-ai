@@ -1,6 +1,5 @@
 import http from "http";
 import { AddressInfo } from "net";
-import { SpeechJobStartError } from "../transcription";
 import { serviceConfig } from "../config";
 import {
   claimTranscriptJob,
@@ -12,8 +11,12 @@ import {
 import {
   finalizeTranscriptFromRawObject,
   inspectBatchRecognizeOperation,
+  NoAudioDetectedError,
+  PermanentTranscriptParseError,
+  SpeechJobStartError,
   startTranscriptionJob,
 } from "../transcription";
+import { logger } from "../logger";
 import { app } from "../index";
 
 jest.mock("firebase-admin", () => ({
@@ -160,7 +163,7 @@ describe("transcription HTTP endpoints", () => {
     jest.clearAllMocks();
     serviceConfig.enableTranscription = true;
     (updateTranscript as jest.Mock).mockResolvedValue(undefined);
-    (updateTranscriptStatus as jest.Mock).mockResolvedValue(undefined);
+    (updateTranscriptStatus as jest.Mock).mockResolvedValue(true);
   });
 
   describe("POST /transcribe-audio", () => {
@@ -181,6 +184,20 @@ describe("transcription HTTP endpoints", () => {
       const response = await postJson(
         "/transcribe-audio",
         pubsubBody({ videoId: "uid-1762753390224" }),
+      );
+      expect(response.status).toBe(200);
+      expect(claimTranscriptJob).not.toHaveBeenCalled();
+      expect(startTranscriptionJob).not.toHaveBeenCalled();
+    });
+
+    it("acks a truthy non-string videoId with 200 so Pub/Sub does not retry", async () => {
+      const response = await postJson(
+        "/transcribe-audio",
+        pubsubBody({
+          videoId: { nested: true },
+          transcriptId: "primary",
+          audioGcsUri: "gs://atmuri-yt-audio-work/uid-1762753390224.flac",
+        }),
       );
       expect(response.status).toBe(200);
       expect(claimTranscriptJob).not.toHaveBeenCalled();
@@ -211,6 +228,16 @@ describe("transcription HTTP endpoints", () => {
       const response = await postJson("/transcribe-audio", pubsubBody(job));
       expect(response.status).toBe(200);
       expect(response.text).toContain("already failed");
+      expect(startTranscriptionJob).not.toHaveBeenCalled();
+    });
+
+    it("does not start Speech for a terminal no_audio_detected transcript", async () => {
+      (claimTranscriptJob as jest.Mock).mockResolvedValue({
+        kind: "terminal-no-audio",
+      });
+      const response = await postJson("/transcribe-audio", pubsubBody(job));
+      expect(response.status).toBe(200);
+      expect(response.text).toContain("No speech detected");
       expect(startTranscriptionJob).not.toHaveBeenCalled();
     });
 
@@ -293,6 +320,18 @@ describe("transcription HTTP endpoints", () => {
       const response = await postJson(
         "/transcript-ready",
         pubsubBody({ eventType: "OBJECT_FINALIZE" }),
+      );
+      expect(response.status).toBe(200);
+      expect(finalizeTranscriptFromRawObject).not.toHaveBeenCalled();
+    });
+
+    it("acks a truthy non-string object name with 200 so Pub/Sub does not retry", async () => {
+      const response = await postJson(
+        "/transcript-ready",
+        pubsubBody({
+          bucket: "atmuri-yt-transcripts",
+          name: ["raw/uid-1762753390224/primary/out.json"],
+        }),
       );
       expect(response.status).toBe(200);
       expect(finalizeTranscriptFromRawObject).not.toHaveBeenCalled();
@@ -386,9 +425,106 @@ describe("transcription HTTP endpoints", () => {
         expect.objectContaining({ segmentCount: 1, durationSeconds: 1 }),
       );
     });
+
+    it("marks a well-formed zero-segment Speech result no_audio_detected, not failed", async () => {
+      (getTranscript as jest.Mock).mockResolvedValue({
+        videoId: "uid-1762753390224",
+        status: "running",
+        source: "batch",
+        language: "en-US",
+        model: "long",
+        audioGcsUri: "gs://atmuri-yt-audio-work/uid-1762753390224.flac",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockRejectedValue(
+        new NoAudioDetectedError(),
+      );
+      const response = await postJson(
+        "/transcript-ready",
+        pubsubBody({ bucket: "atmuri-yt-transcripts", name: objectName }),
+      );
+      expect(response.status).toBe(200);
+      expect(response.text).toContain("No speech detected");
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "no_audio_detected",
+        expect.objectContaining({ segmentCount: 0, durationSeconds: 0 }),
+      );
+      expect(updateTranscriptStatus).not.toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "failed",
+        expect.anything(),
+      );
+    });
+
+    it("acks a permanent Speech JSON parse failure and marks the transcript failed", async () => {
+      (getTranscript as jest.Mock).mockResolvedValue({
+        videoId: "uid-1762753390224",
+        status: "running",
+        language: "en-US",
+        model: "long",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockRejectedValue(
+        new PermanentTranscriptParseError(
+          "Speech v2 result at gs://atmuri-yt-transcripts/raw/uid-1762753390224/primary/out.json is not valid JSON",
+        ),
+      );
+      const response = await postJson(
+        "/transcript-ready",
+        pubsubBody({ bucket: "atmuri-yt-transcripts", name: objectName }),
+      );
+      expect(response.status).toBe(200);
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "failed",
+        expect.objectContaining({
+          error: expect.stringContaining("not valid JSON"),
+        }),
+      );
+    });
+
+    it("returns 500 for a transient finalization failure so Pub/Sub can retry", async () => {
+      (getTranscript as jest.Mock).mockResolvedValue({
+        videoId: "uid-1762753390224",
+        status: "running",
+        language: "en-US",
+        model: "long",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockRejectedValue(
+        new Error("GCS unavailable"),
+      );
+      const response = await postJson(
+        "/transcript-ready",
+        pubsubBody({ bucket: "atmuri-yt-transcripts", name: objectName }),
+      );
+      expect(response.status).toBe(500);
+      expect(updateTranscriptStatus).not.toHaveBeenCalled();
+    });
   });
 
   describe("POST /reconcile-transcripts", () => {
+    it("returns 200 without querying or calling Speech when transcription is disabled", async () => {
+      serviceConfig.enableTranscription = false;
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        skipped: boolean;
+        reason: string;
+      };
+      expect(body.skipped).toBe(true);
+      expect(body.reason).toBe("transcription disabled");
+      expect(listTranscriptsForReconcile).not.toHaveBeenCalled();
+      expect(inspectBatchRecognizeOperation).not.toHaveBeenCalled();
+      expect(finalizeTranscriptFromRawObject).not.toHaveBeenCalled();
+      expect(updateTranscriptStatus).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(
+        "Skipping transcript reconciliation; ENABLE_TRANSCRIPTION is false",
+        expect.objectContaining({ component: "transcription" }),
+      );
+    });
+
     it("recovers a completed Speech job from operation.result", async () => {
       (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
         {
@@ -462,6 +598,87 @@ describe("transcription HTTP endpoints", () => {
       );
     });
 
+    it("does not count a suppressed done-to-failed transition as failed", async () => {
+      (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
+        {
+          id: "primary",
+          videoId: "uid-1762753390224",
+          status: "running",
+          language: "en-US",
+          model: "long",
+          operationName: "operations/abc",
+          claimedAt: { toMillis: () => 0 },
+        },
+      ]);
+      (inspectBatchRecognizeOperation as jest.Mock).mockResolvedValue({
+        done: true,
+        error: "Speech job failed",
+      });
+      (updateTranscriptStatus as jest.Mock).mockResolvedValue(false);
+
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        failed: number;
+        needsReview: number;
+        recovered: number;
+      };
+      expect(body.failed).toBe(0);
+      expect(body.needsReview).toBe(0);
+      expect(body.recovered).toBe(0);
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "failed",
+        expect.objectContaining({ error: "Speech job failed" }),
+      );
+    });
+
+    it("does not count a sweeper done write as recovered when notification already finished", async () => {
+      (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
+        {
+          id: "primary",
+          videoId: "uid-1762753390224",
+          status: "running",
+          language: "en-US",
+          model: "long",
+          operationName: "operations/abc",
+          claimedAt: { toMillis: () => 0 },
+        },
+      ]);
+      (inspectBatchRecognizeOperation as jest.Mock).mockResolvedValue({
+        done: true,
+        outputUri:
+          "gs://atmuri-yt-transcripts/raw/uid-1762753390224/primary/out.json",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockResolvedValue({
+        gcsPath:
+          "gs://atmuri-yt-transcripts/normalized/uid-1762753390224/primary.json",
+        transcript: {
+          segments: [{ text: "Hi", startTime: 0, endTime: 1 }],
+          durationSeconds: 1,
+        },
+      });
+      (updateTranscriptStatus as jest.Mock).mockResolvedValue(false);
+
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        recovered: number;
+        failed: number;
+        errors: number;
+      };
+      expect(body.recovered).toBe(0);
+      expect(body.failed).toBe(0);
+      expect(body.errors).toBe(0);
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "done",
+        expect.objectContaining({ segmentCount: 1 }),
+      );
+    });
+
     it("continues the sweep when one item throws and still recovers the others", async () => {
       (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
         {
@@ -495,7 +712,7 @@ describe("transcription HTTP endpoints", () => {
       (finalizeTranscriptFromRawObject as jest.Mock).mockImplementation(
         async (_videoId: string, transcriptId: string) => {
           if (transcriptId === "broken") {
-            throw new Error("malformed Speech result");
+            throw new Error("GCS unavailable");
           }
           return {
             gcsPath:
@@ -531,6 +748,91 @@ describe("transcription HTTP endpoints", () => {
         "broken",
         "done",
         expect.anything(),
+      );
+    });
+
+    it("marks a permanent Speech schema failure failed instead of retrying it", async () => {
+      (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
+        {
+          id: "primary",
+          videoId: "uid-1762753390224",
+          status: "running",
+          language: "en-US",
+          model: "long",
+          operationName: "operations/abc",
+          claimedAt: { toMillis: () => 0 },
+        },
+      ]);
+      (inspectBatchRecognizeOperation as jest.Mock).mockResolvedValue({
+        done: true,
+        outputUri:
+          "gs://atmuri-yt-transcripts/raw/uid-1762753390224/primary/out.json",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockRejectedValue(
+        new PermanentTranscriptParseError(
+          "Unexpected Speech v2 result JSON: missing results[] (BatchRecognizeResults)",
+        ),
+      );
+
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        failed: number;
+        errors: number;
+        recovered: number;
+      };
+      expect(body.failed).toBe(1);
+      expect(body.errors).toBe(0);
+      expect(body.recovered).toBe(0);
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "failed",
+        expect.objectContaining({
+          error: expect.stringContaining("missing results[]"),
+        }),
+      );
+    });
+
+    it("counts a well-formed empty Speech result as noAudioDetected, not failed", async () => {
+      (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
+        {
+          id: "primary",
+          videoId: "uid-1762753390224",
+          status: "running",
+          source: "batch",
+          language: "en-US",
+          model: "long",
+          operationName: "operations/abc",
+          claimedAt: { toMillis: () => 0 },
+        },
+      ]);
+      (inspectBatchRecognizeOperation as jest.Mock).mockResolvedValue({
+        done: true,
+        outputUri:
+          "gs://atmuri-yt-transcripts/raw/uid-1762753390224/primary/out.json",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockRejectedValue(
+        new NoAudioDetectedError(),
+      );
+
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        failed: number;
+        errors: number;
+        recovered: number;
+        noAudioDetected: number;
+      };
+      expect(body.noAudioDetected).toBe(1);
+      expect(body.failed).toBe(0);
+      expect(body.errors).toBe(0);
+      expect(body.recovered).toBe(0);
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "no_audio_detected",
+        expect.objectContaining({ segmentCount: 0 }),
       );
     });
   });

@@ -1,3 +1,15 @@
+export const SPEECH_PROCESSING_STRATEGY_VALUES = [
+  "STANDARD",
+  "DYNAMIC_BATCHING",
+] as const;
+
+export type SpeechProcessingStrategy =
+  (typeof SPEECH_PROCESSING_STRATEGY_VALUES)[number];
+
+export type SpeechApiProcessingStrategy =
+  | "PROCESSING_STRATEGY_UNSPECIFIED"
+  | "DYNAMIC_BATCHING";
+
 interface IServiceConfig {
   rawVideoBucketName: string;
   processedVideoBucketName: string;
@@ -10,6 +22,12 @@ interface IServiceConfig {
   rawTranscriptPrefix: string;
   normalizedTranscriptPrefix: string;
   enableTranscription: boolean;
+  /**
+   * LAUNCH BLOCKER. Default STANDARD is ~5× DYNAMIC_BATCHING
+   * ($0.016/min vs $0.003/min). Switch to DYNAMIC_BATCHING before
+   * production lecture audio. See parseSpeechProcessingStrategy.
+   */
+  speechProcessingStrategy: SpeechProcessingStrategy;
   processingMaxAttempts: number;
   reconcileStaleAfterMs: number;
   projectId?: string;
@@ -49,6 +67,46 @@ function getBooleanEnvVar(key: string, fallback: boolean): boolean {
 
 function normalizePrefix(value: string): string {
   return value.replace(/^\/+|\/+$/g, "");
+}
+
+/**
+ * LAUNCH BLOCKER — `SPEECH_PROCESSING_STRATEGY`
+ *
+ * Accepted values (exact, case-sensitive):
+ * - `STANDARD` (default): Speech v2 `PROCESSING_STRATEGY_UNSPECIFIED`.
+ *   Processed as soon as received. ~$0.016/min. Test runs finish in minutes.
+ *   This is 5× the DYNAMIC_BATCHING price ($0.016 vs $0.003 per minute).
+ * - `DYNAMIC_BATCHING`: fulfilled within 24 hours at the discounted rate.
+ *   Required for production launch; unusable while iterating on tests.
+ *
+ * Unrecognized values throw at process start so we never send garbage to
+ * the Speech API. Cloud Build deploys this from `_SPEECH_PROCESSING_STRATEGY`.
+ */
+export function parseSpeechProcessingStrategy(
+  raw: string | undefined,
+): SpeechProcessingStrategy {
+  if (raw === undefined || raw.trim().length === 0) {
+    return "STANDARD";
+  }
+  const value = raw.trim();
+  if (value === "STANDARD" || value === "DYNAMIC_BATCHING") {
+    return value;
+  }
+  throw new Error(
+    `Unrecognized SPEECH_PROCESSING_STRATEGY=${JSON.stringify(raw)}. ` +
+      "Accepted values: STANDARD (default; processes immediately at ~$0.016/min) " +
+      "or DYNAMIC_BATCHING (~$0.003/min, fulfilled within 24 hours). " +
+      "STANDARD is 5× the batch price and must be switched to DYNAMIC_BATCHING " +
+      "before production launch.",
+  );
+}
+
+export function speechApiProcessingStrategy(
+  strategy: SpeechProcessingStrategy,
+): SpeechApiProcessingStrategy {
+  return strategy === "DYNAMIC_BATCHING"
+    ? "DYNAMIC_BATCHING"
+    : "PROCESSING_STRATEGY_UNSPECIFIED";
 }
 
 /**
@@ -123,6 +181,9 @@ validateTranscriptPrefixesOrWarn(
   normalizedTranscriptPrefix,
   enableTranscription,
 );
+const speechProcessingStrategy = parseSpeechProcessingStrategy(
+  getEnvVar("SPEECH_PROCESSING_STRATEGY"),
+);
 
 export const serviceConfig: IServiceConfig = {
   rawVideoBucketName: getEnvVar("RAW_VIDEO_BUCKET_NAME") ?? "atmuri-yt-raw-videos",
@@ -141,6 +202,7 @@ export const serviceConfig: IServiceConfig = {
   rawTranscriptPrefix,
   normalizedTranscriptPrefix,
   enableTranscription,
+  speechProcessingStrategy,
   processingMaxAttempts: getNumericEnvVar("PROCESSING_MAX_ATTEMPTS", 3),
   reconcileStaleAfterMs: getNumericEnvVar(
     "RECONCILE_STALE_AFTER_MS",

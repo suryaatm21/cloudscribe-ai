@@ -17,7 +17,8 @@ Project: `yt-clone-385f4` (display name `cloudscribe-ai`), region `us-central1`.
 | Cloud Billing Budget API | **Disabled** (`billingbudgets.googleapis.com`). `gcloud billing budgets list` cannot run without enabling it; it was left disabled. |
 | Billing export to BigQuery | **None** (no datasets in the project) |
 | Vertex AI indexes / index endpoints | **Zero** |
-| Cloud SQL / GCE / Scheduler / Speech / Secret Manager APIs | Not enabled (so those products are not running) |
+| Cloud SQL / GCE / Secret Manager APIs | Not enabled (so those products are not running) |
+| Speech-to-Text / Cloud Scheduler APIs | **Enabled** 20 August 2026 (Sprint 2 infra). Transcription remains gated off; no Speech job has been started. |
 
 `My Billing Account` is Google's default display name. It does not mean “trial” or “has credits.”
 
@@ -42,15 +43,23 @@ So: this account **will be charged** for usage. The **actual** last-month invoic
 
 The only measured standing charge today is **Artifact Registry storage**.
 
+**Update (20 August 2026):** the legacy `gcr.io` repo (**1,162 MiB**) was deleted. Cleanup policies were applied to both remaining Artifact Registry repos (`video-processing-service`, `yt-web-client-repo`). Six new build images then pushed billed size **temporarily up to about 6.4 GiB (~$0.59/month)**.
+
+**Update (20 August 2026, later):** billed size has settled to **worker 1443.023 MB + web 1888.882 MB ≈ 3.25 GiB combined**, about **$0.28/month** after the 0.5 GiB free tier (2.75 GiB × $0.10). Cleanup policies are live on both app repos.
+
+Snapshot below is the 19 August inventory *before* that cleanup + rebuild. Treat the 6.4 GiB figure as a transient post-rebuild peak, not the current total.
+
 | Repository | Billed size (`sizeBytes`) | Notes |
 | --- | --- | --- |
-| `video-processing-service` | **2.878 GiB** (3,090,212,354 bytes) | ffmpeg worker images; no cleanup policy |
-| `yt-web-client-repo` | **1.723 GiB** (1,850,631,535 bytes) | Next.js images; no cleanup policy |
+| `video-processing-service` | **2.878 GiB** (3,090,212,354 bytes) | ffmpeg worker images; cleanup policy now applied (see update above) |
+| `yt-web-client-repo` | **1.723 GiB** (1,850,631,535 bytes) | Next.js images; cleanup policy now applied |
 | `gcf-artifacts` | 0 | Functions images; cleanup policy deletes anything older than 1 day |
 | `web-client` | 0 | Empty leftover repo (`cleanupPolicyDryRun: true`) |
-| **Total** | **4.601 GiB** | First **0.5 GiB / billing-account / month** is free ([Artifact Registry pricing](https://cloud.google.com/artifact-registry/pricing)) |
+| **Total (19 Aug)** | **4.601 GiB** | First **0.5 GiB / billing-account / month** is free ([Artifact Registry pricing](https://cloud.google.com/artifact-registry/pricing)) |
+| **Total (20 Aug, transient)** | **~6.4 GiB** | After deleting `gcr.io` (1,162 MiB) and applying cleanup, six new images landed before old layers expired |
+| **Total (20 Aug, later)** | **~3.25 GiB** | worker **1443.023 MB** + web **1888.882 MB**; ~$0.28/month after 0.5 GiB free |
 
-Billable: 4.101 GiB × **$0.10 / GiB-month** (`$0.000136986 / GiB-hour`) ≈ **$0.41 / month**, 24/7, even if nobody visits the app and nobody pushes code.
+Billable (19 Aug): 4.101 GiB × **$0.10 / GiB-month** ≈ **$0.41 / month**. Transient peak (20 Aug, ~6.4 GiB): ≈ **$0.59 / month**. **Current (20 Aug, later):** ≈ **3.25 GiB → $0.28 / month**. Promo credits are expired; this is pay-as-you-go.
 
 That is the idle bill. Everything else currently running is request-shaped or inside Always Free.
 
@@ -190,7 +199,9 @@ After the cheap wins in §6 (prune images + `e2-standard-2`): idle **~$0.08–0.
 
 ### AFTER Sprint 2 deploys (Speech-to-Text v2 batch, still no Vertex RAG)
 
-Sprint 2 is built in git and **not** deployed. `speech.googleapis.com` is not enabled. Scheduler API is not enabled. No transcript/audio buckets exist yet.
+Sprint 2 **code is merged and deployed** to Cloud Run, gated off (`ENABLE_TRANSCRIPTION=false` on revision `video-processing-service-00016-m9z`). `speech.googleapis.com` and `cloudscheduler.googleapis.com` **are** enabled. Transcript/audio buckets, topics, subscriptions, the `raw/` notification, and Cloud Scheduler job `reconcile-transcripts` (ENABLED, every 15 minutes) **exist**; the infra script was verified idempotent. Transcription itself has not been exercised: no Speech call has been made and no real Speech v2 output has been observed.
+
+The **test/deploy default** for `SPEECH_PROCESSING_STRATEGY` is **`STANDARD`** (~$0.016/min, minutes-scale). **Production launch must use `DYNAMIC_BATCHING`** (~$0.003/min, 24h ceiling). Leaving `STANDARD` on for lecture audio is a 5× cost defect.
 
 Sprint 2 does not add a 24/7 instance if min-instances stay 0 and Scheduler stays at one job (first 3 Cloud Scheduler jobs are free).
 
@@ -274,16 +285,16 @@ Until then, **$0 idle beats 99% recall-at-scale you will not use.**
 
 Suggested shape when Sprint 4 is built: collection `chunks` with `uid`, `videoId`, `text`, `embedding` (768-d). Index on `uid` + vector field. Chat: embed the question → `findNearest` limit 8 → Gemini with citations. No new GCP product.
 
-## 6. Cheap wins (do these; this session did not)
+## 6. Cheap wins (status)
 
-None of these were applied. They are safe, high-leverage, and mostly one-time.
+Artifact Registry cleanup policies **have been applied** to `video-processing-service` and `yt-web-client-repo` (20 August 2026). The legacy `gcr.io` repo (1,162 MiB) was deleted. Billed size then moved **up** to ~6.4 GiB because of new build images; **current billed size is worker 1443.023 MB + web 1888.882 MB ≈ 3.25 GiB (~$0.28/month)**. Cloud Build YAML on this branch already uses `E2_STANDARD_2`.
 
-1. **Delete stale Artifact Registry images** (or add a cleanup policy). Recovers ~$0.30/month immediately; stops unbounded growth. See §8 for the repo-side change.
-2. **Switch Cloud Build `machineType` to `e2-standard-2`.** Saves **$0.16 per merge**, 100% of CI compute at solo cadence. Bump the worker `timeout` if needed.
-3. **Disable the duplicate GitHub Actions worker deploy** so `main` does not push the same image twice.
-4. **GCS lifecycle on the raw bucket** (delete or Archive after N days, or delete raw once processed). Not a bill today; it is the unbounded line.
-5. **Console budget** at $5 / $10. API is disabled; create it in Billing → Budgets.
-6. **Delete debris:** failed `on_request_example`, empty `web-client` AR repo, unused `failed-messages` topic, confirm Hosting site is empty.
+Remaining (still human-run; this session does not apply them):
+
+1. **Disable the duplicate GitHub Actions worker deploy** so `main` does not push the same image twice.
+2. **GCS lifecycle on the raw bucket** (delete or Archive after N days, or delete raw once processed).
+3. **Console budget** at $5 / $10. API is disabled; create it in Billing → Budgets.
+4. **Delete debris:** failed `on_request_example`, empty `web-client` AR repo, unused `failed-messages` topic, confirm Hosting site is empty.
 
 ## 7. Possible later offset: YC Startup School Start Tier
 
@@ -319,9 +330,9 @@ These files live on `main` or on the Sprint 2 branch. This branch only updates t
 | `video-processing-service/cloudbuild.yaml` | Remove `options.machineType: N1_HIGHCPU_8` (default is `e2-standard-2`), or set `E2_STANDARD_2` if the schema requires an explicit value. Raise `timeout` from `600s` to `1200s` so a slower 2-vCPU ffmpeg build cannot kill the job. | **$0.061 / worker build**; ~$0.50–$1.00 / month at 8–16 worker builds. Uses the 2,500 free minutes. |
 | `yt-web-client/cloudbuild.yaml` | Same `machineType` change. Timeout already `900s`; watch the first default-machine build and raise if needed. | **$0.098 / web build**; rest of the pair. |
 | `.github/workflows/deploy-video-processing.yml` | Delete or disable (`if: false` / remove `on.push`). Cloud Build trigger `video-processing-service` already deploys on `main`. Dual-running this workflow double-writes Artifact Registry. | Avoids a second ~600 MB+ image per worker change; prevents extra AR GB-month and a racey double deploy. |
-| Artifact Registry cleanup (cloud config, not a git file today) | Add a **live** cleanup policy on `video-processing-service` and `yt-web-client-repo`: keep `latest` + last 2 tagged SHAs; delete untagged and tags older than 14 days. Do **not** leave `cleanupPolicyDryRun: true` (that is what `web-client` has). Optionally delete the dead `processor` and `web-client` packages now. | **~$0.30 / month now**, and stops $0.10/GiB-month growth on every merge. |
+| Artifact Registry cleanup (`utils/artifact-registry-cleanup-policy.json`) | Add a **live** cleanup policy on `video-processing-service` and `yt-web-client-repo`: keep `latest` + last 2 tagged SHAs; delete untagged manifests older than 7 days and tags older than 14 days. Do **not** leave `cleanupPolicyDryRun: true` (that is what `web-client` has). Optionally delete the dead `processor` and `web-client` packages now. | **~$0.30 / month now**, and stops $0.10/GiB-month growth on every merge. |
 | GCS lifecycle (new JSON, same pattern as `utils/gcs-cors.json`) | On `atmuri-yt-raw-videos`: delete objects after 30 days, **or** delete after successful transcode in the worker. On processed: optional Nearline/Archive after 90 days if originals are disposable. | $0 today; avoids unbounded Standard storage. 59 MiB orphan raw object is the proof this matters. |
-| Sprint 2 (when that branch deploys) | Keep `processingStrategy: 'DYNAMIC_BATCHING'`. Do not enable Speech standard for “it should be faster.” Prefix-filter transcript notifications so `normalized/` cannot retrigger. One Scheduler sweeper only. | 5× Speech multiplier avoided ($0.18/h vs $0.96/h). |
+| Sprint 2 (when the flag turns on) | Keep test default `SPEECH_PROCESSING_STRATEGY=STANDARD` only while iterating. **Launch with `DYNAMIC_BATCHING`.** Prefix-filter transcript notifications so `normalized/` cannot retrigger. One Scheduler sweeper only. | 5× Speech multiplier avoided ($0.18/h vs $0.96/h) once batching is on. |
 | Sprint 4 (future) | Firestore `findNearest` + 768-d embeddings. **Do not** add Vector Search, RAG Engine, or Cloud SQL to any Terraform/gcloud setup script. | Avoids **$68–900 / month** standing. |
 
 ## 9. Pricing traps (pay-as-you-go edition)
@@ -329,7 +340,7 @@ These files live on `main` or on the Sprint 2 branch. This branch only updates t
 1. **Credits are gone.** There is no buffer. A leftover Vector Search index is a $68/month subscription you did not mean to buy.
 2. **RAG Scaled is a 1-node Spanner Enterprise instance (~$900/month)**, not a serverless upgrade.
 3. **`N1_HIGHCPU_8` is not on the 2,500-minute free SKU.** It is the largest *current* usage-shaped line once you start merging again.
-4. **Artifact Registry has no cleanup on the two app repos.** Every merge is a GB-month that never evaporates.
+4. **Artifact Registry cleanup is on** the two app repos (7-day untagged, 14-day tagged). Current billed size is ~3.25 GiB (~$0.28/month). The leftover `web-client` repo still has `cleanupPolicyDryRun: true` and is empty.
 5. **`DYNAMIC_BATCHING` off** multiplies Speech by ~5×.
 6. **Official v2 Speech has no listed free 60 minutes.**
 7. **Normalized transcripts under `raw/`** retrigger Speech forever.

@@ -1,6 +1,6 @@
 # Cost operations (out-of-pocket GCP)
 
-Promo credits on project `yt-clone-385f4` expired. Remaining standing spend is Artifact Registry storage (~$0.41/month as of 19 Aug 2026). Cloud Build on `N1_HIGHCPU_8` was ~$0.16 per merge to `main`. Cloud Run min-instances is 0; GCS is under the 5 GB Always Free tier.
+Promo credits on project `yt-clone-385f4` expired (pay-as-you-go). Artifact Registry was ~$0.41/month (19 Aug), peaked at ~$0.59/month (~6.4 GiB) after deleting the legacy `gcr.io` repo (1,162 MiB), applying cleanup policies, and pushing six new images, and is now **worker 1443.023 MB + web 1888.882 MB ≈ 3.25 GiB (~$0.28/month)**. Cleanup policies are live on both app repos. Cloud Build on this branch uses `E2_STANDARD_2`. Cloud Run min-instances is 0; GCS is under the 5 GB Always Free tier.
 
 This file lists **human-run** bucket and registry commands. Do **not** apply them from CI. Deleting images is irreversible.
 
@@ -32,13 +32,13 @@ Inspect without changing:
 gcloud storage buckets describe gs://atmuri-yt-raw-videos --format='yaml(lifecycle_config)'
 ```
 
-## Artifact Registry cleanup policy (not applied)
+## Artifact Registry cleanup policy (applied 20 August 2026; runbook retained)
 
 Policy file: `utils/artifact-registry-cleanup-policy.json`
 
 - Keep anything tagged `latest*`
 - Keep the 2 most recent versions per package
-- Delete untagged manifests
+- Delete untagged manifests older than 7 days
 - Delete tagged versions older than 14 days
 
 Keep policies win when a version matches both keep and delete. `latest` usually aliases the newest SHA, so unique retained digests are typically 2 per live package (current `latest` + one rollback). Bump `keepCount` to `3` if you want `latest` plus two additional SHA tags.
