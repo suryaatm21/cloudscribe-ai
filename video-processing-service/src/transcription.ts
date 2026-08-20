@@ -102,10 +102,29 @@ export class PermanentTranscriptParseError extends Error {
   }
 }
 
+/**
+ * Well-formed Speech result with zero usable speech segments.
+ * Callers must mark the transcript `no_audio_detected`, not `failed`.
+ */
+export class NoAudioDetectedError extends Error {
+  constructor(
+    message = "Speech v2 result contained no usable speech segments",
+  ) {
+    super(message);
+    this.name = "NoAudioDetectedError";
+  }
+}
+
 export function isPermanentTranscriptParseError(
   error: unknown,
 ): error is PermanentTranscriptParseError {
   return error instanceof PermanentTranscriptParseError;
+}
+
+export function isNoAudioDetectedError(
+  error: unknown,
+): error is NoAudioDetectedError {
+  return error instanceof NoAudioDetectedError;
 }
 
 function throwPermanentParse(message: string): never {
@@ -313,7 +332,10 @@ export async function startTranscriptionJob(
     recognitionOutputConfig: {
       gcsOutputConfig: { uri: outputUri },
     },
-    processingStrategy: "DYNAMIC_BATCHING" as const,
+    processingStrategy:
+      serviceConfig.speechProcessingStrategy === "DYNAMIC_BATCHING"
+        ? ("DYNAMIC_BATCHING" as const)
+        : ("PROCESSING_STRATEGY_UNSPECIFIED" as const),
   };
 
   try {
@@ -432,9 +454,7 @@ export function buildTranscriptPayload(
     const alternative = firstAlternative(result, index);
     const text = stringField(alternative, "transcript")?.trim() ?? "";
     if (!text) {
-      throwPermanentParse(
-        `Unexpected Speech v2 result JSON: results[${index}] is missing transcript text`,
-      );
+      return;
     }
 
     const words = asArray(readField(alternative, "words"));
@@ -463,9 +483,7 @@ export function buildTranscriptPayload(
   });
 
   if (segments.length === 0) {
-    throwPermanentParse(
-      "Speech v2 result contained no usable segments; refusing to persist an empty transcript",
-    );
+    throw new NoAudioDetectedError();
   }
 
   logger.info("Built transcript payload from Speech v2 JSON", {

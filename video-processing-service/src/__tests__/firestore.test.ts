@@ -5,6 +5,7 @@ import {
   shouldApplyTranscriptStatusTransition,
   TranscriptDocument,
   updateTranscriptStatus,
+  RECONCILE_TRANSCRIPT_STATUSES,
 } from "../firestore";
 
 jest.mock("firebase-admin", () => ({
@@ -47,6 +48,7 @@ describe("evaluateTranscriptClaim", () => {
   const pending: TranscriptDocument = {
     videoId: "video-1",
     status: "pending",
+    source: "batch",
     language: "en-US",
     model: "long",
   };
@@ -100,6 +102,16 @@ describe("evaluateTranscriptClaim", () => {
     ).toEqual({ kind: "terminal-failed" });
   });
 
+  it("treats no_audio_detected as terminal even when an operation name is present", () => {
+    expect(
+      evaluateTranscriptClaim({
+        ...pending,
+        status: "no_audio_detected",
+        operationName: "operations/previous",
+      }),
+    ).toEqual({ kind: "terminal-no-audio" });
+  });
+
   it("does not re-claim a needs_review transcript", () => {
     expect(
       evaluateTranscriptClaim({
@@ -118,6 +130,7 @@ describe("claimTranscriptJob concurrency", () => {
       data: {
         videoId: "video-1",
         status: "pending",
+        source: "batch",
         language: "en-US",
         model: "long",
       },
@@ -220,6 +233,16 @@ describe("transcript status updates", () => {
     expect(payload.error).toBe("boom");
   });
 
+  it("sets completedAt and clears error on no_audio_detected", () => {
+    const payload = buildTranscriptStatusUpdate("no_audio_detected", {
+      segmentCount: 0,
+    });
+    expect(payload.status).toBe("no_audio_detected");
+    expect(payload.completedAt).toBeDefined();
+    expect(payload.error).toEqual(FieldValue.delete());
+    expect(payload.segmentCount).toBe(0);
+  });
+
   it("refuses to regress a done transcript and allows recovery to done", () => {
     expect(shouldApplyTranscriptStatusTransition("done", "failed")).toBe(false);
     expect(shouldApplyTranscriptStatusTransition("done", "running")).toBe(false);
@@ -230,6 +253,25 @@ describe("transcript status updates", () => {
     expect(shouldApplyTranscriptStatusTransition("running", "failed")).toBe(
       true,
     );
+    expect(
+      shouldApplyTranscriptStatusTransition("no_audio_detected", "failed"),
+    ).toBe(false);
+    expect(
+      shouldApplyTranscriptStatusTransition(
+        "no_audio_detected",
+        "no_audio_detected",
+      ),
+    ).toBe(true);
+    expect(
+      shouldApplyTranscriptStatusTransition("running", "no_audio_detected"),
+    ).toBe(true);
+  });
+
+  it("excludes no_audio_detected from sweeper candidates", () => {
+    expect(RECONCILE_TRANSCRIPT_STATUSES).toEqual(["running", "needs_review"]);
+    expect(RECONCILE_TRANSCRIPT_STATUSES).not.toContain("no_audio_detected");
+    expect(RECONCILE_TRANSCRIPT_STATUSES).not.toContain("failed");
+    expect(RECONCILE_TRANSCRIPT_STATUSES).not.toContain("done");
   });
 });
 
@@ -290,5 +332,15 @@ describe("updateTranscriptStatus", () => {
       }),
     ).resolves.toBe(true);
     expect(setFn).toHaveBeenCalled();
+  });
+
+  it("refuses to regress no_audio_detected to failed", async () => {
+    currentStatus = "no_audio_detected";
+    await expect(
+      updateTranscriptStatus("video-1", "primary", "failed", {
+        error: "late failure",
+      }),
+    ).resolves.toBe(false);
+    expect(setFn).not.toHaveBeenCalled();
   });
 });

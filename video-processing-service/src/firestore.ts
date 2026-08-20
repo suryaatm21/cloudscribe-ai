@@ -37,20 +37,36 @@ export interface Video {
  *
  * pending → running: only `/transcribe-audio` may claim, and only from pending.
  * running → done: GCS notification or sweeper after Speech writes output.
+ * running → no_audio_detected: Speech returned a well-formed result with
+ *   zero usable speech segments (silent screen recording, etc.). Terminal,
+ *   not an error — there is no transcript artifact to sign.
  * running → failed: Speech (or our pre-RPC validation) definitely never
- *   started, or Speech completed with a recorded error.
+ *   started, or Speech completed with a recorded error / unparseable output.
  * running → needs_review: Speech RPC may already have been accepted (timeout,
  *   or failure while persisting operationName). Terminal for automatic retries
  *   so we never start a second billed job; a human or the sweeper adjudicates.
- * failed and needs_review are terminal for `/transcribe-audio`.
+ * failed, needs_review, done, and no_audio_detected are terminal for
+ * `/transcribe-audio`.
  */
 export type TranscriptStatus =
   | "pending"
   | "running"
   | "failed"
   | "done"
-  | "needs_review";
+  | "needs_review"
+  | "no_audio_detected";
 
+/**
+ * How the transcript was produced. Downstream notes/indexing/chat must not
+ * branch on this — live is another producer of the same document. `batch`
+ * is the only producer today; `live` is reserved for Sprint 6.
+ */
+export type TranscriptSource = "batch" | "live";
+
+/**
+ * Sweeper candidates. Terminal statuses (done, failed, no_audio_detected)
+ * are excluded so they are never re-claimed or re-processed.
+ */
 export const RECONCILE_TRANSCRIPT_STATUSES: TranscriptStatus[] = [
   "running",
   "needs_review",
@@ -60,6 +76,11 @@ export interface TranscriptDocument {
   id?: string;
   videoId: string;
   status: TranscriptStatus;
+  /**
+   * Producer discriminator. Always `batch` today. Batch-only fields below
+   * stay optional so a future live session can omit them.
+   */
+  source: TranscriptSource;
   gcsPath?: string;
   segmentCount?: number;
   durationSeconds?: number;
@@ -69,7 +90,9 @@ export interface TranscriptDocument {
   completedAt?: Timestamp;
   claimedAt?: Timestamp;
   error?: string;
+  /** Batch Speech LRO name. Meaningless for a live streaming session. */
   operationName?: string;
+  /** Batch FLAC object. Meaningless for a live streaming session. */
   audioGcsUri?: string;
   userId?: string;
 }
@@ -78,6 +101,7 @@ export type TranscriptClaimResult =
   | { kind: "missing" }
   | { kind: "already-done" }
   | { kind: "terminal-failed" }
+  | { kind: "terminal-no-audio" }
   | { kind: "needs-review" }
   | { kind: "reuse-operation"; operationName: string }
   | { kind: "claim-in-progress" }
@@ -85,8 +109,8 @@ export type TranscriptClaimResult =
 
 /**
  * Pure decision for the atomic Speech-job claim.
- * Only `pending` may transition to `running`. `failed` and `needs_review`
- * are terminal for automatic retries.
+ * Only `pending` may transition to `running`. `failed`, `needs_review`,
+ * `done`, and `no_audio_detected` are terminal for automatic retries.
  */
 export function evaluateTranscriptClaim(
   transcript: TranscriptDocument | undefined,
@@ -99,6 +123,9 @@ export function evaluateTranscriptClaim(
   }
   if (transcript.status === "failed") {
     return { kind: "terminal-failed" };
+  }
+  if (transcript.status === "no_audio_detected") {
+    return { kind: "terminal-no-audio" };
   }
   if (transcript.status === "needs_review") {
     return { kind: "needs-review" };
@@ -128,7 +155,8 @@ export function wasTranscriptClaimed(
     transcript.status === "running" ||
     transcript.status === "needs_review" ||
     transcript.status === "failed" ||
-    transcript.status === "done"
+    transcript.status === "done" ||
+    transcript.status === "no_audio_detected"
   );
 }
 
@@ -221,16 +249,22 @@ export async function updateTranscript(
 }
 
 /**
- * Last-write-wins is kept for non-done transitions. The only race we guard
- * is regressing a completed transcript (notification vs sweeper vs a late
- * failure write). A full status state machine would be more invasive than
- * this slice needs.
+ * Last-write-wins is kept for in-flight transitions. The race we guard is
+ * regressing a finished transcript (`done` or `no_audio_detected`) —
+ * notification vs sweeper vs a late failure write.
  */
+function isFinishedTranscriptStatus(status: TranscriptStatus): boolean {
+  return status === "done" || status === "no_audio_detected";
+}
+
 export function shouldApplyTranscriptStatusTransition(
   current: TranscriptStatus | undefined,
   next: TranscriptStatus,
 ): boolean {
-  return !(current === "done" && next !== "done");
+  if (current !== undefined && isFinishedTranscriptStatus(current)) {
+    return next === current;
+  }
+  return true;
 }
 
 export function buildTranscriptStatusUpdate(
@@ -241,10 +275,17 @@ export function buildTranscriptStatusUpdate(
     status,
     ...overrides,
   };
-  if (status === "done" || status === "failed") {
+  if (
+    status === "done" ||
+    status === "failed" ||
+    status === "no_audio_detected"
+  ) {
     updatePayload.completedAt = Timestamp.now();
   }
-  if (status === "done" && overrides?.error === undefined) {
+  if (
+    (status === "done" || status === "no_audio_detected") &&
+    overrides?.error === undefined
+  ) {
     updatePayload.error = FieldValue.delete();
   }
   return updatePayload;
@@ -263,10 +304,11 @@ export async function updateTranscriptStatus(
       ? (snapshot.data() as TranscriptDocument).status
       : undefined;
     if (!shouldApplyTranscriptStatusTransition(current, status)) {
-      logger.warn("Refusing to regress transcript status from done", {
+      logger.warn("Refusing to regress a finished transcript", {
         component: "firestore",
         videoId,
         transcriptId,
+        currentStatus: current,
         attemptedStatus: status,
       });
       return false;

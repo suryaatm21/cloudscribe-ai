@@ -1,4 +1,8 @@
-import { assertTranscriptOutputPrefixes } from "../config";
+import {
+  assertTranscriptOutputPrefixes,
+  parseSpeechProcessingStrategy,
+  speechApiProcessingStrategy,
+} from "../config";
 
 describe("assertTranscriptOutputPrefixes", () => {
   it("accepts distinct non-overlapping prefixes", () => {
@@ -44,6 +48,7 @@ describe("serviceConfig load-time validation", () => {
     "ENABLE_TRANSCRIPTION",
     "RAW_TRANSCRIPT_PREFIX",
     "NORMALIZED_TRANSCRIPT_PREFIX",
+    "SPEECH_PROCESSING_STRATEGY",
   ] as const;
   const original: Record<string, string | undefined> = {};
 
@@ -96,5 +101,51 @@ describe("serviceConfig load-time validation", () => {
     process.env.NORMALIZED_TRANSCRIPT_PREFIX = "raw/nested";
     jest.resetModules();
     expect(() => jest.requireActual("../config")).toThrow(/overlap/);
+  });
+
+  it("defaults SPEECH_PROCESSING_STRATEGY to STANDARD", () => {
+    delete process.env.SPEECH_PROCESSING_STRATEGY;
+    jest.resetModules();
+    const { serviceConfig } = jest.requireActual("../config") as {
+      serviceConfig: { speechProcessingStrategy: string };
+    };
+    expect(serviceConfig.speechProcessingStrategy).toBe("STANDARD");
+  });
+
+  it("accepts DYNAMIC_BATCHING", () => {
+    process.env.SPEECH_PROCESSING_STRATEGY = "DYNAMIC_BATCHING";
+    jest.resetModules();
+    const { serviceConfig } = jest.requireActual("../config") as {
+      serviceConfig: { speechProcessingStrategy: string };
+    };
+    expect(serviceConfig.speechProcessingStrategy).toBe("DYNAMIC_BATCHING");
+  });
+
+  it("fails at import on an unrecognized SPEECH_PROCESSING_STRATEGY", () => {
+    process.env.SPEECH_PROCESSING_STRATEGY = "FAST";
+    jest.resetModules();
+    expect(() => jest.requireActual("../config")).toThrow(
+      /Unrecognized SPEECH_PROCESSING_STRATEGY/,
+    );
+  });
+});
+
+describe("parseSpeechProcessingStrategy", () => {
+  it("maps STANDARD to PROCESSING_STRATEGY_UNSPECIFIED and DYNAMIC_BATCHING through", () => {
+    expect(parseSpeechProcessingStrategy(undefined)).toBe("STANDARD");
+    expect(parseSpeechProcessingStrategy("")).toBe("STANDARD");
+    expect(parseSpeechProcessingStrategy("STANDARD")).toBe("STANDARD");
+    expect(parseSpeechProcessingStrategy("DYNAMIC_BATCHING")).toBe(
+      "DYNAMIC_BATCHING",
+    );
+    expect(speechApiProcessingStrategy("STANDARD")).toBe(
+      "PROCESSING_STRATEGY_UNSPECIFIED",
+    );
+    expect(speechApiProcessingStrategy("DYNAMIC_BATCHING")).toBe(
+      "DYNAMIC_BATCHING",
+    );
+    expect(() => parseSpeechProcessingStrategy("dynamic_batching")).toThrow(
+      /Unrecognized/,
+    );
   });
 });

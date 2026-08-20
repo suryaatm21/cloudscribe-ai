@@ -193,6 +193,7 @@ async function triggerTranscriptionPipeline(
 
     await createTranscript(videoId, transcriptId, {
       status: "pending",
+      source: "batch",
       language: serviceConfig.speechToTextLanguage,
       model: serviceConfig.speechToTextModel,
       audioGcsUri,

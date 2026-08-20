@@ -24,6 +24,7 @@ jest.mock("../config", () => ({
     rawTranscriptPrefix: "raw",
     normalizedTranscriptPrefix: "normalized",
     projectId: "yt-clone-385f4",
+    speechProcessingStrategy: "STANDARD",
   },
 }));
 
@@ -56,10 +57,12 @@ import {
   inspectDecodedBatchRecognizeOperation,
   parseRawTranscriptObjectName,
   PermanentTranscriptParseError,
+  NoAudioDetectedError,
   SpeechJobStartError,
   startTranscriptionJob,
   uploadTranscriptPayload,
 } from "../transcription";
+import { serviceConfig } from "../config";
 
 function buildGaxBatchRecognizeOperation(outputUri: string) {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -114,6 +117,7 @@ describe("transcription module", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    serviceConfig.speechProcessingStrategy = "STANDARD";
   });
 
   it("starts a Speech v2 batchRecognize job and returns the operation name", async () => {
@@ -134,7 +138,7 @@ describe("transcription module", () => {
             uri: "gs://test-transcripts/raw/uid-1762753390224/primary/",
           },
         },
-        processingStrategy: "DYNAMIC_BATCHING",
+        processingStrategy: "PROCESSING_STRATEGY_UNSPECIFIED",
         config: expect.objectContaining({
           languageCodes: ["en-US"],
           features: expect.objectContaining({
@@ -145,6 +149,22 @@ describe("transcription module", () => {
         }),
       }),
     );
+  });
+
+  it("sends DYNAMIC_BATCHING when that strategy is configured", async () => {
+    serviceConfig.speechProcessingStrategy = "DYNAMIC_BATCHING";
+    mockBatchRecognize.mockResolvedValue([{ name: "operations/123" }]);
+    await startTranscriptionJob(
+      "gs://audio/sample.flac",
+      "uid-1762753390224",
+      "primary",
+    );
+    expect(mockBatchRecognize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        processingStrategy: "DYNAMIC_BATCHING",
+      }),
+    );
+    serviceConfig.speechProcessingStrategy = "STANDARD";
   });
 
   it("rejects an empty or non-gs:// audio URI before the RPC", async () => {
@@ -231,6 +251,26 @@ describe("transcription module", () => {
     ).toThrow(/has no alternatives/);
   });
 
+  it("marks a well-formed empty results list as no_audio_detected, not failed", () => {
+    const emptyResults = { results: [] };
+    try {
+      buildTranscriptPayload("video-9", emptyResults);
+      throw new Error("expected NoAudioDetectedError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NoAudioDetectedError);
+      expect(error).not.toBeInstanceOf(PermanentTranscriptParseError);
+    }
+    try {
+      buildTranscriptPayload("video-9", {
+        results: [{ alternatives: [{ transcript: "   " }] }],
+      });
+      throw new Error("expected NoAudioDetectedError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NoAudioDetectedError);
+      expect(error).not.toBeInstanceOf(PermanentTranscriptParseError);
+    }
+  });
+
   it("fails loudly on a malformed entry instead of persisting a partial transcript", () => {
     expect(() =>
       buildTranscriptPayload("video-9", {
@@ -245,10 +285,10 @@ describe("transcription module", () => {
               },
             ],
           },
-          { alternatives: [{ transcript: "   " }] },
+          { alternatives: [{ transcript: "oops", words: [] }] },
         ],
       }),
-    ).toThrow(/results\[1\] is missing transcript text/);
+    ).toThrow(/results\[1\] is missing timing/);
   });
 
   it("requires videoId and non-empty segments before upload", async () => {

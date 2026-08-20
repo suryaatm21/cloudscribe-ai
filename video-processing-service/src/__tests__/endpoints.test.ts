@@ -11,6 +11,7 @@ import {
 import {
   finalizeTranscriptFromRawObject,
   inspectBatchRecognizeOperation,
+  NoAudioDetectedError,
   PermanentTranscriptParseError,
   SpeechJobStartError,
   startTranscriptionJob,
@@ -229,6 +230,16 @@ describe("transcription HTTP endpoints", () => {
       expect(startTranscriptionJob).not.toHaveBeenCalled();
     });
 
+    it("does not start Speech for a terminal no_audio_detected transcript", async () => {
+      (claimTranscriptJob as jest.Mock).mockResolvedValue({
+        kind: "terminal-no-audio",
+      });
+      const response = await postJson("/transcribe-audio", pubsubBody(job));
+      expect(response.status).toBe(200);
+      expect(response.text).toContain("No speech detected");
+      expect(startTranscriptionJob).not.toHaveBeenCalled();
+    });
+
     it("starts Speech after a successful pending claim and persists the operation", async () => {
       (claimTranscriptJob as jest.Mock).mockResolvedValue({ kind: "claimed" });
       (startTranscriptionJob as jest.Mock).mockResolvedValue("operations/123");
@@ -411,6 +422,38 @@ describe("transcription HTTP endpoints", () => {
         "primary",
         "done",
         expect.objectContaining({ segmentCount: 1, durationSeconds: 1 }),
+      );
+    });
+
+    it("marks a well-formed zero-segment Speech result no_audio_detected, not failed", async () => {
+      (getTranscript as jest.Mock).mockResolvedValue({
+        videoId: "uid-1762753390224",
+        status: "running",
+        source: "batch",
+        language: "en-US",
+        model: "long",
+        audioGcsUri: "gs://atmuri-yt-audio-work/uid-1762753390224.flac",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockRejectedValue(
+        new NoAudioDetectedError(),
+      );
+      const response = await postJson(
+        "/transcript-ready",
+        pubsubBody({ bucket: "atmuri-yt-transcripts", name: objectName }),
+      );
+      expect(response.status).toBe(200);
+      expect(response.text).toContain("No speech detected");
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "no_audio_detected",
+        expect.objectContaining({ segmentCount: 0, durationSeconds: 0 }),
+      );
+      expect(updateTranscriptStatus).not.toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "failed",
+        expect.anything(),
       );
     });
 
@@ -682,6 +725,48 @@ describe("transcription HTTP endpoints", () => {
         expect.objectContaining({
           error: expect.stringContaining("missing results[]"),
         }),
+      );
+    });
+
+    it("counts a well-formed empty Speech result as noAudioDetected, not failed", async () => {
+      (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([
+        {
+          id: "primary",
+          videoId: "uid-1762753390224",
+          status: "running",
+          source: "batch",
+          language: "en-US",
+          model: "long",
+          operationName: "operations/abc",
+          claimedAt: { toMillis: () => 0 },
+        },
+      ]);
+      (inspectBatchRecognizeOperation as jest.Mock).mockResolvedValue({
+        done: true,
+        outputUri:
+          "gs://atmuri-yt-transcripts/raw/uid-1762753390224/primary/out.json",
+      });
+      (finalizeTranscriptFromRawObject as jest.Mock).mockRejectedValue(
+        new NoAudioDetectedError(),
+      );
+
+      const response = await postJson("/reconcile-transcripts", {});
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.text) as {
+        failed: number;
+        errors: number;
+        recovered: number;
+        noAudioDetected: number;
+      };
+      expect(body.noAudioDetected).toBe(1);
+      expect(body.failed).toBe(0);
+      expect(body.errors).toBe(0);
+      expect(body.recovered).toBe(0);
+      expect(updateTranscriptStatus).toHaveBeenCalledWith(
+        "uid-1762753390224",
+        "primary",
+        "no_audio_detected",
+        expect.objectContaining({ segmentCount: 0 }),
       );
     });
   });

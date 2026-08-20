@@ -15,6 +15,7 @@ This document captures all required environment variables, service accounts, and
 | `PROCESSING_MAX_ATTEMPTS` | ✅ | `3` | Number of retries before marking a video as failed |
 | `SERVICE_VERSION` | ➖ | `dev` | Overrides version reported by `/health` |
 | `ENABLE_TRANSCRIPTION` | ➖ | `false` | When `true`, `/process-video` queues Speech jobs and the transcribe endpoints run. Cloud Build deploys this from `_ENABLE_TRANSCRIPTION` (still `false` until infra is provisioned). |
+| `SPEECH_PROCESSING_STRATEGY` | ➖ | `STANDARD` | **LAUNCH BLOCKER.** Speech-to-Text v2 `batchRecognize` processing strategy. Accepted values (exact, case-sensitive): `STANDARD` (default; maps to `PROCESSING_STRATEGY_UNSPECIFIED`; processes immediately at ~$0.016/min so test runs finish in minutes) or `DYNAMIC_BATCHING` (~$0.003/min, fulfilled within 24 hours). Unrecognized values refuse to start the service. Cloud Build deploys this from `_SPEECH_PROCESSING_STRATEGY`. `STANDARD` is 5× the batch price — switch to `DYNAMIC_BATCHING` before production lecture audio. |
 | `NODE_ENV` | ➖ | `development` | Used for logging context |
 | `GOOGLE_APPLICATION_CREDENTIALS` | ➖ | – | Path to service account JSON when running locally |
 | `SMOKE_ID_TOKEN` | ➖ | – | Firebase ID token for smoke test authentication |
@@ -92,4 +93,15 @@ If the script cannot describe the gen2 Functions services, pass `--functions-ser
 2. Run `npm test` inside `video-processing-service` to ensure env-dependent logic passes.
 3. Execute `./video-processing-service/deploy.sh` to verify deploy script uses the documented variables.
 4. Run `firebase functions:config:get` to confirm Firebase functions have matching values.
+
+## Pre-launch checklist (transcription)
+
+Do not turn `ENABLE_TRANSCRIPTION` on for real lecture audio until every item is done:
+
+1. Run `scripts/setup-transcription-infra.sh` (buckets, topics, subscriptions, scheduler, IAM). It has **never** been executed.
+2. Confirm `_ENABLE_TRANSCRIPTION` stays `"false"` on the Cloud Build trigger until that infra exists.
+3. **LAUNCH BLOCKER — Speech price:** set `_SPEECH_PROCESSING_STRATEGY=DYNAMIC_BATCHING` on the `video-processing-service` Cloud Build trigger. The code and substitution default is `STANDARD` (~$0.016/min, 5× `DYNAMIC_BATCHING`) so local/test runs finish in minutes. Shipping `STANDARD` to production is a cost defect, not an oversight you can notice later.
+4. Deploy Functions so `getTranscriptUrl` is on the runtime identity the infra script granted.
+5. Flip `_ENABLE_TRANSCRIPTION=true` on the trigger, then deploy the worker.
+6. Update README, this file, and `docs/cost-and-credits.md` in the same PR as the flag flip.
 

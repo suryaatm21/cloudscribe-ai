@@ -35,6 +35,7 @@ import {
   GcsObjectNotification,
   inspectBatchRecognizeOperation,
   isConfiguredTranscriptsBucket,
+  isNoAudioDetectedError,
   isPermanentTranscriptParseError,
   parseGsUri,
   parseRawTranscriptObjectName,
@@ -50,6 +51,39 @@ setupDirectories();
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+async function persistNoAudioDetected(
+  videoId: string,
+  transcriptId: string,
+  audioGcsUri: string | undefined,
+): Promise<boolean> {
+  const applied = await updateTranscriptStatus(
+    videoId,
+    transcriptId,
+    "no_audio_detected",
+    {
+      segmentCount: 0,
+      durationSeconds: 0,
+    },
+  );
+  const audioFileName = audioWorkFileNameFromUri(audioGcsUri);
+  if (audioFileName) {
+    try {
+      await deleteAudioWorkObject(audioFileName);
+    } catch (cleanupError) {
+      logger.warn("Failed to delete audio work object after no_audio_detected", {
+        component: "transcription",
+        videoId,
+        transcriptId,
+        error:
+          cleanupError instanceof Error
+            ? cleanupError.message
+            : cleanupError,
+      });
+    }
+  }
+  return applied;
 }
 
 /**
@@ -210,6 +244,11 @@ app.post(
         return;
       }
 
+      if (claim.kind === "terminal-no-audio") {
+        sendSuccessResponse(res, "No speech detected");
+        return;
+      }
+
       if (claim.kind === "needs-review") {
         sendSuccessResponse(res, "Transcript start needs review");
         return;
@@ -365,9 +404,11 @@ app.post(
     }
 
     const { videoId, transcriptId } = parsedName;
+    let audioGcsUri: string | undefined;
 
     try {
       const transcript = await getTranscript(videoId, transcriptId);
+      audioGcsUri = transcript?.audioGcsUri;
       if (!wasTranscriptClaimed(transcript)) {
         logger.error("Refusing to finalize an unclaimed transcript", {
           component: "transcription",
@@ -381,6 +422,11 @@ app.post(
 
       if (transcript?.status === "done") {
         sendSuccessResponse(res, "Transcript already completed");
+        return;
+      }
+
+      if (transcript?.status === "no_audio_detected") {
+        sendSuccessResponse(res, "No speech detected");
         return;
       }
 
@@ -406,6 +452,34 @@ app.post(
       sendSuccessResponse(res, "Transcript normalized");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (isNoAudioDetectedError(error)) {
+        logger.info("Speech returned no usable speech segments", {
+          component: "transcription",
+          videoId,
+          transcriptId,
+        });
+        try {
+          await persistNoAudioDetected(
+            videoId,
+            transcriptId,
+            audioGcsUri,
+          );
+        } catch (statusError) {
+          logger.error("Failed to persist no_audio_detected", {
+            component: "transcription",
+            videoId,
+            transcriptId,
+            error:
+              statusError instanceof Error
+                ? statusError.message
+                : statusError,
+          });
+          res.status(500).send("Transcript finalization failed");
+          return;
+        }
+        sendSuccessResponse(res, "No speech detected");
+        return;
+      }
       if (isPermanentTranscriptParseError(error)) {
         logger.error(
           "Permanent Speech result parse/schema failure; acking without retry",
@@ -457,6 +531,7 @@ app.post(
     let recovered = 0;
     let stillRunning = 0;
     let needsReview = 0;
+    let noAudioDetected = 0;
     let errors = 0;
 
     try {
@@ -615,6 +690,41 @@ app.post(
         } catch (itemError) {
           const message =
             itemError instanceof Error ? itemError.message : String(itemError);
+          if (isNoAudioDetectedError(itemError) && videoId && transcriptId) {
+            logger.info(
+              "Speech returned no usable speech segments during reconcile",
+              {
+                component: "transcription",
+                videoId,
+                transcriptId,
+              },
+            );
+            try {
+              const applied = await persistNoAudioDetected(
+                videoId,
+                transcriptId,
+                transcript.audioGcsUri,
+              );
+              if (applied) {
+                noAudioDetected += 1;
+              }
+            } catch (statusError) {
+              errors += 1;
+              logger.error(
+                "Failed to persist no_audio_detected during reconcile",
+                {
+                  component: "transcription",
+                  videoId,
+                  transcriptId,
+                  error:
+                    statusError instanceof Error
+                      ? statusError.message
+                      : statusError,
+                },
+              );
+            }
+            continue;
+          }
           if (
             isPermanentTranscriptParseError(itemError) &&
             videoId &&
@@ -673,6 +783,7 @@ app.post(
         recovered,
         stillRunning,
         needsReview,
+        noAudioDetected,
         errors,
       });
     } catch (error) {
