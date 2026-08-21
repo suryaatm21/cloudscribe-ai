@@ -46,7 +46,9 @@ The downstream contract evolves from a normalized **transcript** into a time-ali
 Either modality may be empty. That is how the two permanent fallbacks are represented:
 
 - **`visuals` empty** — transcript-only. First implementation milestone, and the permanent fallback when visual analysis fails or has not been built yet.
-- **`text` empty** — visual-only. Permanent fallback when transcription is `no_audio_detected` and visual analysis produced usable content. Notes generate from OCR text and visual descriptions alone.
+- **`text` empty** — visual-only. Two transcription outcomes reach this shape; they share the assembly route but **must not** share a user-facing status:
+  - **`no_audio_detected`** — no speech existed. Slide-derived notes are **complete**. Nothing is missing.
+  - **`failed`** — speech existed and transcription failed to capture it. Slide-derived notes are **incomplete**. Content is missing. The assembly is **degraded** so the UI can say something like “notes generated from slides only — audio transcription failed.”
 
 Both empty is the genuinely empty lecture: no speech and no usable visuals. That is the only true dead end, and it must surface to the user as empty content rather than as a pipeline error.
 
@@ -83,12 +85,14 @@ flowchart TD
   AudioJob --> Speech["Speech-to-Text v2 batchRecognize"]
   Speech -->|"speech present"| TranscriptDoc["normalized transcript"]
   Speech -->|"no usable speech"| Silent["no_audio_detected"]
+  Speech -->|"transcription failed"| FailedTrans["failed"]
   VisualJob --> SceneDetect["scene detection"]
   SceneDetect --> SampleFloor["fixed-interval sample floor, about 30s"]
   SampleFloor --> Dedup["perceptual-hash dedup"]
   Dedup --> OcrDesc["OCR plus multimodal description"]
   TranscriptDoc --> Assembler["timeline alignment"]
   Silent --> Assembler
+  FailedTrans --> Assembler
   OcrDesc --> Assembler
   Assembler --> ReadyEvent["lecture-content-ready"]
   ReadyEvent --> Notes[notes]
@@ -118,28 +122,63 @@ Claim semantics to copy from transcription:
 - `failed` means the external call definitely never started, or it completed with a recorded error.
 - `needs_review` is **terminal for automatic retries** when the side effect is ambiguous (timeout after an RPC that may have been accepted, persist failure after accept). A human or a sweeper adjudicates. Do not start a second billed OCR/description job from this state.
 - Visual `failed` or `needs_review` still allows assembly when speech exists: notes degrade to **transcript-only**.
-- Transcription `no_audio_detected` still allows assembly when visuals exist: notes degrade to **visual-only**.
+- Transcription `no_audio_detected` still allows assembly when visuals exist: notes assemble as **visual-only, complete**.
+- Transcription `failed` still allows assembly when visuals exist: notes assemble as **visual-only, degraded** (Decision 3 below).
 
 ### Assembler fan-in (decided)
 
 The assembler emits when **required inputs have reached terminal states**. What counts as a satisfied input is now per-modality.
 
-**Transcription input**
+**Transcription input — all four terminal outcomes**
 
-- `done` — satisfied. Normalized segments exist.
-- `no_audio_detected` — **satisfied for the assembler, terminal for the transcription stage.** The sub-status is about audio and stays correct on the transcript artifact: there is no signed transcript (`getTranscriptUrl` already refuses this status). It must **not** terminate the lecture. The assembler treats it as “audio producer finished, nothing to quote,” not as a failure, and **must still wait for visual analysis** to become terminal before assembling.
-- `failed` — **not** a visual-only success path. A Speech job that never started, or that completed with a recorded error, is a transcription failure. Do not treat it as a silent video. `needs_review` on transcription is also not a satisfied assembler input: the audio side effect is still ambiguous.
+- `done` — satisfied. Normalized segments exist. Normal full or transcript-only assembly.
+- `no_audio_detected` — **satisfied for the assembler, terminal for the transcription stage.** The sub-status is about audio and stays correct on the transcript artifact: there is no signed transcript (`getTranscriptUrl` already refuses this status). It must **not** terminate the lecture. The assembler treats it as “audio producer finished, nothing to quote,” not as a failure, and **must still wait for visual analysis** to become terminal before assembling. When visuals are usable, the result is **visual-only, complete** — slide-derived notes are the whole story; nothing is missing.
+- `failed` — **satisfied for the assembler when visuals are usable (Decision 3).** A Speech job that never started, or that completed with a recorded error, is a transcription failure — do not treat it as a silent video. Unlike `no_audio_detected`, speech may have existed; the assembler still emits visual-only lecture-content when visuals are usable, but marks the outcome **degraded** so downstream (notes, UI) can distinguish incomplete from complete. When visuals are not usable, there is nothing to assemble (same dead end as any lecture with no usable modality).
+- `needs_review` — **not covered by Decision 3.** The audio side effect is still ambiguous: Speech may have accepted the job and its output could still arrive via the GCS notification minutes or hours later. See [needs_review assembly timing](#needs_review-assembly-timing-open) below.
+
+**Decision 3 (failed transcription assembles visual-only, marked degraded).** If transcription genuinely fails but the lecture has usable visuals, assemble anyway rather than stranding the lecture — but mark the result degraded. Mechanically the same visual-only path as `no_audio_detected`; semantically opposite. Do not collapse them into one status just because they share an assembly route. The UI must be able to say “notes generated from slides only — audio transcription failed” for degraded, and must **not** use that wording for a silent lecture where slide notes are complete.
+
+Degraded assembly implies notes (and downstream retrieval) must be **regenerable** when a transcript is later recovered — for example when a reconcile sweeper resolves a `needs_review` job whose output eventually lands. See [Notes regenerability](#notes-regenerability-consequence-of-decision-3) below and [sprint-03-notes.md](sprint-03-notes.md).
 
 **Visual input**
 
 - `done` with usable content — satisfied.
-- `failed` / `needs_review` / not-yet-built — satisfied as a *degraded* input when transcription is `done` (transcript-only fallback). When transcription is `no_audio_detected`, the same visual terminals mean there is nothing to assemble.
+- `failed` / `needs_review` / not-yet-built — satisfied as a *degraded* input when transcription is `done` (transcript-only fallback). When transcription is `no_audio_detected` or `failed`, the same visual terminals with **no** usable content mean there is nothing to assemble.
 
-**Worked example (silent slides).** A student uploads a 40-minute screen recording of a slide deck with the microphone off. Speech returns a well-formed empty result. The transcript document becomes `no_audio_detected`; the watch page still has no transcript URL to sign. The assembler does not stop. It waits for scene detection, the sample floor, hash dedup, OCR, and descriptions. If those produce usable slide text and diagrams, it emits lecture-content with empty `text` and populated `visuals`. Notes run on OCR + descriptions. The UI must not say the lecture failed.
+**Worked example (silent slides).** A student uploads a 40-minute screen recording of a slide deck with the microphone off. Speech returns a well-formed empty result. The transcript document becomes `no_audio_detected`; the watch page still has no transcript URL to sign. The assembler does not stop. It waits for scene detection, the sample floor, hash dedup, OCR, and descriptions. If those produce usable slide text and diagrams, it emits lecture-content with empty `text` and populated `visuals`. Notes run on OCR + descriptions. The outcome is **visual-only, complete**. The UI must not say the lecture failed, and must not imply missing audio content.
+
+**Worked example (failed transcription, usable slides).** A 45-minute lecture with narration and slides. Speech RPC fails after accept, or the normalized file never lands; transcription is terminal `failed`. Visual analysis completes with readable slide OCR. The assembler emits lecture-content with empty `text` and populated `visuals` — the same shape as the silent case, but marked **degraded**. Notes run from slides only. The UI should say something like “notes generated from slides only — audio transcription failed,” because spoken explanation existed and is missing from the notes.
 
 **Worked example (talking head, visual failure).** A 50-minute talking-head lecture transcribes cleanly (`done`). Visual analysis hits `needs_review` after an OCR RPC that may already have been billed. The assembler emits lecture-content with `text` and empty `visuals`. Notes still run. This is the existing transcript-only fallback.
 
 **Worked example (genuinely empty).** A five-minute clip of a dark room: no speech, no readable slides, no usable descriptions. Transcript is `no_audio_detected`; visual analysis is terminal with nothing usable. There is no lecture-content to note or index. Surface that outcome to the user as empty content — “nothing to transcribe or read” — not as an error, and not as the transcript’s `no_audio_detected` label alone (that label is about audio).
+
+### Notes regenerability (consequence of Decision 3)
+
+If a lecture assembles **degraded** (visual-only because transcription `failed`, or later because a `needs_review` timeout policy chooses to degrade — if that is ever decided) and the transcript is later recovered, the notes generated from slides alone are wrong or at least incomplete relative to available data. Notes are therefore **not write-once**. The Sprint 3 notes design must allow regeneration when lecture-content is re-assembled with a recovered transcript.
+
+Follow-on questions are **unresolved** — do not implement as if answered:
+
+- Does regeneration **overwrite** the existing notes document or **version** it (keeping degraded notes visible for audit)?
+- What happens to retrieval **chunks and citations** already indexed from the degraded version — re-index in place, tombstone old chunks, or version the corpus?
+
+Record these in [sprint-03-notes.md](sprint-03-notes.md) and [sprint-04-rag-indexing.md](sprint-04-rag-indexing.md) when implementing; the constraint originates here.
+
+### needs_review assembly timing (open)
+
+Decision 3 covers **`failed` only**. **`needs_review` is explicitly not covered.**
+
+`failed` is terminal: the system knows transcription did not succeed, so degraded visual-only assembly is safe relative to that fact. `needs_review` is different: it means Speech **may** have accepted the job and its output could still arrive via the GCS notification minutes or hours later. Assembling degraded notes from a `needs_review` transcript risks producing notes that go stale almost immediately when the transcript lands.
+
+Options to weigh (no choice recorded):
+
+| Option | Upside | Downside |
+| --- | --- | --- |
+| **Wait indefinitely** for `needs_review` to resolve before assembling | Never ships stale degraded notes | Can strand a lecture forever if the notification never arrives and no sweeper adjudicates |
+| **Wait with a timeout, then degrade** | Bounds wait; eventually unblocks the student | Requires a timeout policy (not chosen here); notes may still need regeneration if the transcript arrives after timeout |
+| **Degrade immediately, re-assemble when transcript arrives** | Student gets slide notes quickly | Notes and indexed chunks can be wrong for hours; **requires** the regenerability constraint above |
+
+This needs a **product decision**. Do not pick a timeout value or a default policy in code until it is recorded. Whichever option is chosen, if degraded assembly is ever allowed from `needs_review`, it inherits the same regenerability requirement as Decision 3.
 
 ### Assembly outcomes
 
@@ -147,15 +186,17 @@ The assembler emits when **required inputs have reached terminal states**. What 
 | --- | --- | --- |
 | `done` | `done`, usable | Full lecture-content (`text` + `visuals`). |
 | `done` | `failed` / `needs_review` / empty | **Transcript-only fallback.** Permanent. First milestone looks like this even before visuals exist. |
-| `no_audio_detected` | `done`, usable | **Visual-only fallback.** Permanent. Notes from OCR + descriptions only. |
+| `no_audio_detected` | `done`, usable | **Visual-only, complete.** No speech existed; OCR + descriptions are the whole story. |
 | `no_audio_detected` | `failed` / `needs_review` / no usable visuals | **Genuinely empty.** The only true dead end. User-facing empty state, not a pipeline error. |
-| `failed` (or transcription `needs_review`) | any | Not a visual-only path. Transcription did not successfully report silence. |
+| `failed` | `done`, usable | **Visual-only, degraded (Decision 3).** Speech existed; slide notes are incomplete. Same assembly route as silent; different UX status. |
+| `failed` | `failed` / `needs_review` / no usable visuals | Nothing to assemble. Not the “genuinely empty” case (speech may have existed) — surface as missing content, not as silent-video empty. Exact user-facing label is [open](#where-the-five-statuses-live-open). |
+| `needs_review` | any | **Not decided.** Do not treat as `failed` or `no_audio_detected`. See [needs_review assembly timing](#needs_review-assembly-timing-open). |
 
-Notes quality from visuals alone is **unproven** and will differ a lot by content. A slide deck with readable bullets should work well. A whiteboard derivation with no narration will likely work much less well: OCR on handwriting is weaker, and there is no spoken explanation to fill the gaps. That is accepted product risk, not a reason to block silent lectures.
+Notes quality from visuals alone is **unproven** and will differ a lot by content. A slide deck with readable bullets should work well. A whiteboard derivation with no narration will likely work much less well: OCR on handwriting is weaker, and there is no spoken explanation to fill the gaps. That is accepted product risk, not a reason to block silent lectures or degraded failed-transcription assembly.
 
 What counts as “usable visuals” (one OCR token? a non-blank description? a minimum frame count?) is not chosen. Do not invent a threshold.
 
-The lecture-level field that stores “empty” vs “assembled” is not named here. That depends on [where the five statuses live](#open-questions).
+The lecture-level field that stores complete vs degraded vs empty is not named here. That depends on [where the five statuses live](#where-the-five-statuses-live-open).
 
 ## Recommended technical decisions
 
@@ -164,7 +205,7 @@ The lecture-level field that stores “empty” vs “assembled” is not named 
 3. **Store frames in Cloud Storage** with timestamps and ownership metadata (`videoId`, `uid`, capture time). Frames are not public playback objects; they are study artifacts. Serve them only through short-lived signed URLs, following the same pattern as transcripts (`getTranscriptUrl`: V4 signed read URL after an owner check). **Do not** call `makePublic()` on frames. Enforcement is [bucket construction, not convention](#4-privacy-risk-class-changes).
 4. **Run OCR plus multimodal descriptions** so diagrams and non-text visuals are captured, not only slide text.
 5. **Keep text embeddings initially** (`text-embedding-005` at 768 dimensions into Firestore `findNearest`). Defer native image embeddings until visual similarity search is justified. That is a new retrieval question, not a change to the locked Sprint 4 index. Visual-only lectures still embed OCR text and descriptions as text.
-6. **Citations reference both video timestamps and extracted frames.** Visual-only citations have a frame and a timestamp and no spoken quote.
+6. **Citations reference both video timestamps and extracted frames.** Visual-only citations have a frame and a timestamp and no spoken quote. **Degraded** visual-only (transcription `failed`) cannot cite spoken timestamps — there is no transcript segment to anchor to. See [sprint-05-study-chatbot.md](sprint-05-study-chatbot.md).
 7. **Do not** make repeated full-video multimodal calls the default.
 
 These are design choices, not deployed behavior.
@@ -258,7 +299,7 @@ Do not budget Pro-class descriptions as the default. Do not treat $0.35 as a mea
 
 ## Open questions
 
-These were gaps in the original proposal. Two (silent-video assembly, frame-storage vs security sequencing) are decided above. The remaining five are **unresolved**. Do not implement as if they had answers.
+These were gaps in the original proposal. Silent-video assembly, frame-storage vs security sequencing, and failed-transcription degraded assembly (Decision 3) are decided above. The remaining items are **unresolved**. Do not implement as if they had answers.
 
 ### Alignment semantics (open)
 
@@ -270,7 +311,7 @@ Visual-only **changes the input to this question**: there may be no transcript s
 
 The table above names `transcriptionStatus`, `visualAnalysisStatus`, `contentAssemblyStatus`, `notesStatus`, and `indexingStatus` as fields. Transcription already lives on `videos/{videoId}/transcripts/{id}.status`. Whether the new names are extra fields on the video doc, sibling docs, or a rename of the transcript field is not chosen. Do not invent a second identifier while choosing.
 
-Visual-only does not choose the layout. It does add a lecture-level outcome that **cannot** be the transcript’s `no_audio_detected` (that sub-status stays about audio) and **should not** be `failed` (empty is not an error). The empty-lecture surface needs a home once layout is chosen. Do not name that field here.
+Visual-only does not choose the layout. It does add lecture-level outcomes that **cannot** be the transcript’s `no_audio_detected` (that sub-status stays about audio) and **should not** be `failed` (empty is not an error). Complete visual-only, degraded visual-only, and empty-lecture surfaces each need a home once layout is chosen. Do not name those fields here.
 
 ### Dedup-before-OCR recall risk (open)
 

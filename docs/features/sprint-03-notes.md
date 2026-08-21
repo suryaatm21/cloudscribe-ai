@@ -8,9 +8,27 @@ Notes consume the **lecture-content model**, not the raw transcript document. Id
 
 **Transcript-only is the first milestone and one of two permanent fallbacks.** The first notes implementation reads lecture-content segments that have `text` and empty `visuals` (or a transcript mapped into that shape). When visual analysis fails or has not been built yet, notes still run. Visual failure must not strand a lecture that has speech.
 
-The mirror fallback is **visual-only**: transcription `no_audio_detected` plus usable visuals. Notes then generate from OCR text and visual descriptions alone. That path is not the first ship — it waits for keyframes/OCR/assembly — but the notes service must not treat empty `text` as a job failure once that payload exists. Quality from visuals alone is unproven and will vary (a slide deck should work well; a silent whiteboard derivation much less so).
+The mirror fallback is **visual-only**, reached by two transcription outcomes that share the assembly route but **must not** share a user-facing status:
+
+- **`no_audio_detected` plus usable visuals** — **complete.** No speech existed; OCR + descriptions are the whole story.
+- **`failed` plus usable visuals (Decision 3)** — **degraded.** Speech existed and was not captured; slide notes are incomplete. The UI should say something like “notes generated from slides only — audio transcription failed.”
+
+That path is not the first ship — it waits for keyframes/OCR/assembly — but the notes service must not treat empty `text` as a job failure once that payload exists. Quality from visuals alone is unproven and will vary (a slide deck should work well; a silent whiteboard derivation much less so).
 
 The genuinely empty lecture (no speech **and** no usable visuals) is the only true dead end. Do not generate notes for it, and do not surface it as a notes or pipeline error.
+
+**`needs_review` on transcription is not covered by Decision 3.** Assembly timing for that status is an [open product question](multimodal-lecture-content.md#needs_review-assembly-timing-open) in the design doc. Do not assemble degraded notes from `needs_review` until that is decided.
+
+### Notes regenerability (constraint from Decision 3)
+
+Notes are **not write-once**. If a lecture first assembles degraded (visual-only because transcription `failed`, or later if a `needs_review` policy allows timeout-then-degrade) and the transcript is later recovered — for example when a reconcile sweeper resolves `needs_review` — the slide-only notes are wrong or incomplete relative to available data. The notes service must support **regeneration** when lecture-content is re-assembled with a recovered transcript.
+
+Follow-on questions are **unresolved**:
+
+- Does regeneration **overwrite** the existing notes document or **version** it?
+- What happens to retrieval **chunks and citations** already indexed from the degraded version?
+
+Do not implement overwrite/versioning or re-index behavior until the product owner records answers. The constraint is real regardless of which option is chosen.
 
 Do not wait for keyframes, OCR, or timeline assembly before shipping that first notes path. Building notes against transcript-only lecture-content is how we learn whether audio-only notes are already adequate for some lectures, and what is missing when they are not. Visual enrichment — and visual-only notes — come later (implementation order in the design doc: schema → notes-from-transcript → keyframes → OCR → assembly with both fallbacks → retrieval).
 
@@ -29,9 +47,9 @@ Produce structured study notes and outlines from lecture-content via a dedicated
 ## Technical Tasks
 
 - Scaffold Cloud Run Node service with Vertex AI SDK + Secret Manager integration for API keys.
-- Fetch lecture-content + schema validation before calling Gemini; handle missing `visuals`, empty OCR, empty `text` (visual-only), and degraded transcript-only payloads without failing the job. Skip the model call on a genuinely empty lecture.
+- Fetch lecture-content + schema validation before calling Gemini; handle missing `visuals`, empty OCR, empty `text` (visual-only complete or degraded), and degraded transcript-only payloads without failing the job. Skip the model call on a genuinely empty lecture. Persist whether notes were generated from a **complete** or **degraded** lecture-content payload so the UI can distinguish silent slides from failed transcription.
 - Build prompt template loader that reads from a versioned folder and injects metadata (course, duration, goals).
-- Write Firestore + GCS persistence layer for notes + attachments (e.g. outline, key takeaways). Persist `notesStatus` on the per-stage claim model (same `pending` / `running` / `done` / `failed` / `needs_review` pattern as transcription).
+- Write Firestore + GCS persistence layer for notes + attachments (e.g. outline, key takeaways). Persist `notesStatus` on the per-stage claim model (same `pending` / `running` / `done` / `failed` / `needs_review` pattern as transcription). Support **regeneration** when lecture-content is re-assembled after transcript recovery (see Notes regenerability above).
 - Subscribe to `lecture-content-ready` (and, for the first milestone, transcript `done` if that event is not built yet). Do not subscribe to transcript `no_audio_detected` as a notes trigger.
 - SPIKE – Evaluate prompt output cost vs quality across Gemini models; document recommended default. Visual tokens in the prompt are a later cost; do not assume they are free.
 
@@ -43,10 +61,11 @@ Produce structured study notes and outlines from lecture-content via a dedicated
 
 ## Success Metrics
 
-- 90% of lecture-content documents with a usable modality (transcription `done`, or `no_audio_detected` plus usable visuals) auto-generate notes within 2 minutes of `lecture-content-ready` (or the transcript-only stand-in for the first milestone).
-- Manual review of 3 sample outputs meets a formatting checklist (headings, bullets, action items). At least one sample should be transcript-only so that fallback is exercised. Once visuals exist, add a visual-only sample; do not treat its quality as a ship gate for the first (transcript-only) milestone.
+- 90% of lecture-content documents with a usable modality (transcription `done`, `no_audio_detected` plus usable visuals, or `failed` plus usable visuals) auto-generate notes within 2 minutes of `lecture-content-ready` (or the transcript-only stand-in for the first milestone).
+- Manual review of 3 sample outputs meets a formatting checklist (headings, bullets, action items). At least one sample should be transcript-only so that fallback is exercised. Once visuals exist, add complete visual-only and degraded visual-only samples; do not treat their quality as a ship gate for the first (transcript-only) milestone.
 - Feature flag allows enabling/disabling notes without redeploy.
 - A simulated visual-analysis failure still produces notes (degraded, transcript-only).
+- A simulated failed transcription with usable slides still produces notes (degraded, visual-only) with UI-appropriate incomplete messaging — not the same as a silent lecture.
 - A simulated empty lecture (no speech, no usable visuals) does not call Gemini and does not surface as a notes error.
 
 ## Deferred Complexity

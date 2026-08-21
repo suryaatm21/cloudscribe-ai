@@ -4,7 +4,11 @@
 
 ## Contract
 
-Chat retrieves lecture-content chunks (Sprint 4) and answers with citations. A citation must be able to point at **both** a video timestamp **and** an extracted frame when one exists. Transcript-only chunks still cite timestamps. Visual-only chunks cite a frame and a timestamp and have no spoken quote. Do not cite a frame that was not stored.
+Chat retrieves lecture-content chunks (Sprint 4) and answers with citations. A citation must be able to point at **both** a video timestamp **and** an extracted frame when one exists. Transcript-only chunks still cite timestamps. Visual-only chunks cite a frame and a timestamp and have no spoken quote.
+
+**Degraded visual-only** (transcription `failed`, slide notes only) differs from **complete visual-only** (`no_audio_detected`, silent slides). In both cases there is no spoken quote, but degraded chunks also **cannot cite spoken timestamps** — there is no transcript segment to anchor to. Citations may still reference frame capture time and frame URI. The UI should not imply a spoken passage exists when notes were generated from slides after transcription failure. See Decision 3 in [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
+
+Do not cite a frame that was not stored.
 
 Identity is `videoId`. Downstream stays independent of whether the lecture-content was produced by batch upload or live capture. Design: [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
 
@@ -18,7 +22,7 @@ Expose a grounded Q&A experience in the web client that queries the RAG store an
 
 ## Technical Tasks
 - Implement retrieval call with filters (workspaceId + userId) and rank top chunks; include fallback if no context returned.
-- Build Gemini request payload enforcing a citation template that can emit timestamp range **and** frame URI (omit frame when `visuals` were empty) + safety settings.
+- Build Gemini request payload enforcing a citation template that can emit timestamp range **and** frame URI (omit frame when `visuals` were empty) + safety settings. For degraded visual-only chunks, omit spoken-timestamp anchors; frame time and URI remain valid.
 - Add rate limiting + quota enforcement per user to prevent abuse.
 - Update upload/job metadata to link lecture-content / notes / retrieval artifacts for quick lookups. Do not key anything on `lectureId`.
 - Instrument tracing/logging for questionId across chat + retrieval calls.
