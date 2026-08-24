@@ -114,9 +114,15 @@ function buildGaxBatchRecognizeOperation(outputUri: string) {
 }
 
 describe("transcription module", () => {
-  const fixture = JSON.parse(
+  const observedFixture = JSON.parse(
     fs.readFileSync(
-      path.join(__dirname, "fixtures/speech-v2-batch-results.json"),
+      path.join(__dirname, "fixtures/speech-v2-batch-results-observed.json"),
+      "utf8",
+    ),
+  );
+  const syntheticFixture = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, "fixtures/speech-v2-batch-results-synthetic.json"),
       "utf8",
     ),
   );
@@ -210,8 +216,29 @@ describe("transcription module", () => {
     });
   });
 
-  it("maps a realistic Speech v2 GCS result fixture into ITranscriptPayload", () => {
-    const payload = buildTranscriptPayload("video-7", fixture);
+  it("maps observed real Speech v2 GCS output into ITranscriptPayload without metadata", () => {
+    expect(observedFixture).not.toHaveProperty("metadata");
+    const payload = buildTranscriptPayload("video-7", observedFixture);
+    expect(payload.videoId).toBe("video-7");
+    expect(payload.segments).toHaveLength(1);
+    expect(payload.segments[0]).toEqual({
+      text: "hmm",
+      startTime: 0.7,
+      endTime: 2.2,
+      confidence: 0.16799638,
+    });
+    expect(payload.durationSeconds).toBe(2.2);
+    expect(payload.language).toBe("en-US");
+  });
+
+  it("ignores per-word confidence and lowercase languageCode from observed output", () => {
+    const payload = buildTranscriptPayload("video-7", observedFixture);
+    expect(payload.segments[0].confidence).toBe(0.16799638);
+    expect(payload.language).toBe("en-US");
+  });
+
+  it("maps a synthetic multi-segment Speech v2 fixture into ITranscriptPayload", () => {
+    const payload = buildTranscriptPayload("video-7", syntheticFixture);
     expect(payload.videoId).toBe("video-7");
     expect(payload.segments).toHaveLength(2);
     expect(payload.segments[0]).toEqual({
@@ -224,25 +251,10 @@ describe("transcription module", () => {
     expect(payload.durationSeconds).toBe(2.4);
   });
 
-  it("accepts duration objects with seconds and nanos", () => {
-    const payload = buildTranscriptPayload("video-8", {
-      results: [
-        {
-          alternatives: [
-            {
-              transcript: "Hi",
-              words: [
-                {
-                  startOffset: { seconds: "0", nanos: 0 },
-                  endOffset: { seconds: "1", nanos: 500000000 },
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-    expect(payload.segments[0].endTime).toBe(1.5);
+  it("accepts duration objects with seconds and nanos from synthetic fixture", () => {
+    const payload = buildTranscriptPayload("video-8", syntheticFixture);
+    expect(payload.segments[0].startTime).toBe(0);
+    expect(payload.segments[0].endTime).toBe(1.2);
   });
 
   it("fails loudly on unexpected Speech v2 JSON", () => {

@@ -1,4 +1,5 @@
 {
+  "_comment": "SYNTHETIC / DEFENSIVE — not observed in production. Exercises multi-segment payloads, {seconds,nanos} duration encoding, and documents that metadata (if present) is ignored by the parser. Do not treat this as ground truth for Google's output shape.",
   "results": [
     {
       "alternatives": [
@@ -7,14 +8,14 @@
           "confidence": 0.94,
           "words": [
             {
-              "startOffset": "0s",
-              "endOffset": "0.400s",
+              "startOffset": { "seconds": "0", "nanos": 0 },
+              "endOffset": { "seconds": "0", "nanos": 400000000 },
               "word": "Hello",
               "confidence": 0.98
             },
             {
-              "startOffset": "0.400s",
-              "endOffset": "1.200s",
+              "startOffset": { "seconds": "0", "nanos": 400000000 },
+              "endOffset": { "seconds": "1", "nanos": 200000000 },
               "word": "world.",
               "confidence": 0.91
             }

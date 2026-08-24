@@ -4,35 +4,20 @@ import { getStorageClient } from "./storage";
 import { logger } from "./logger";
 
 /**
- * Assumed Speech-to-Text v2 GCS result JSON shape
- * ================================================
- * Nobody on this project has seen a real v2 `batchRecognize` result file yet.
- * `buildTranscriptPayload` therefore validates the parsed object and throws
- * on unexpected structure instead of returning an empty transcript.
+ * Speech-to-Text v2 GCS result JSON shape
+ * =======================================
+ * Observed real output (2026-08-24) — see
+ * `video-processing-service/src/__tests__/fixtures/speech-v2-batch-results-observed.json`
+ * and `docs/features/sprint-02-batch-transcription.md`.
  *
- * Documented REST / proto3 JSON for `BatchRecognizeResults`:
- *   {
- *     results: SpeechRecognitionResult[],
- *     metadata?: RecognitionResponseMetadata
- *   }
+ * Observed properties:
+ *   - camelCase throughout
+ *   - durations as proto3 strings (`"0.700s"`), not `{seconds, nanos}` objects
+ *   - no top-level `metadata` block in the file Google wrote to GCS
+ *   - per-word `confidence` present; parser uses alternative-level confidence
+ *   - `languageCode` may be lowercase (e.g. `"en-us"`) vs configured `"en-US"`
  *
- * Each `SpeechRecognitionResult`:
- *   {
- *     alternatives: [{
- *       transcript: string,
- *       confidence?: number,
- *       words?: [{
- *         startOffset: string,   // proto3 Duration, e.g. "0.400s"
- *         endOffset: string,
- *         word: string,
- *         confidence?: number
- *       }]
- *     }],
- *     resultEndOffset?: string,
- *     languageCode?: string
- *   }
- *
- * Additional encodings we accept so a later correction is cheap:
+ * Additional encodings we accept defensively (synthetic fixture covers these):
  *   - Duration as `{ seconds, nanos }` (protobufjs / some client dumps)
  *   - snake_case field names (`start_offset`, `end_offset`, `result_end_offset`)
  *
