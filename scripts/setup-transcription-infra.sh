@@ -461,6 +461,10 @@ resolve_functions_service_account
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 PUBSUB_SA="service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com"
 GCS_SA="service-${PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com"
+# Google's Speech service agent is created implicitly when the Speech API is
+# enabled and first used; it is not visible in IAM until then. batchRecognize
+# writes raw result JSON to the transcripts bucket as this identity.
+SPEECH_SA="service-${PROJECT_NUMBER}@gcp-sa-speech.iam.gserviceaccount.com"
 
 TRANSCRIPTS_LIFECYCLE="$(cat <<EOF
 {
@@ -522,6 +526,12 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 gcloud storage buckets add-iam-policy-binding "gs://${TRANSCRIPTS_BUCKET_NAME}" \
   --member "serviceAccount:${SERVICE_ACCOUNT}" \
   --role "roles/storage.objectAdmin" >/dev/null
+
+# Speech v2 batchRecognize writes raw JSON under raw/ as the Speech service
+# agent. objectCreator is sufficient; the runtime SA reads and normalizes it.
+gcloud storage buckets add-iam-policy-binding "gs://${TRANSCRIPTS_BUCKET_NAME}" \
+  --member "serviceAccount:${SPEECH_SA}" \
+  --role "roles/storage.objectCreator" >/dev/null
 
 gcloud storage buckets add-iam-policy-binding "gs://${AUDIO_WORK_BUCKET_NAME}" \
   --member "serviceAccount:${SERVICE_ACCOUNT}" \
@@ -643,5 +653,6 @@ fi
 echo "===> Transcription infrastructure setup complete."
 echo "Push identity ${PUSH_IDENTITY} can invoke ${CLOUD_RUN_SERVICE}."
 echo "Runtime account ${SERVICE_ACCOUNT} has speech.client and datastore.user."
+echo "Speech service agent ${SPEECH_SA} has objectCreator on transcripts (raw JSON output)."
 echo "Functions account ${FUNCTIONS_SERVICE_ACCOUNT} has objectViewer on transcripts and TokenCreator on itself."
 echo "GCS notification filter is ${RAW_OBJECT_PREFIX}."
