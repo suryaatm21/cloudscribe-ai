@@ -1,8 +1,26 @@
 import { Storage } from '@google-cloud/storage';
 import fs from 'fs';
-import ffmpeg from 'fluent-ffmpeg';
+import ffmpeg, { FfprobeData } from 'fluent-ffmpeg';
 import { serviceConfig } from './config';
 import { logger } from './logger';
+
+/**
+ * Source media has no audio stream at all (screen recording with mic off,
+ * synthetic test pattern, etc.). Callers must mark the transcript
+ * `no_audio_detected`, not `failed`.
+ */
+export class NoAudioStreamError extends Error {
+  constructor(message = 'Source media contains no audio stream') {
+    super(message);
+    this.name = 'NoAudioStreamError';
+  }
+}
+
+export function isNoAudioStreamError(
+  error: unknown,
+): error is NoAudioStreamError {
+  return error instanceof NoAudioStreamError;
+}
 
 const storage = new Storage();
 
@@ -63,17 +81,46 @@ export function convertVideo(rawVideoName: string, processedVideoName: string) {
 }
 
 /**
+ * Probes a local media file for at least one audio stream via ffprobe.
+ * Prefer this over parsing ffmpeg stderr when deciding whether silence is
+ * "no audio track" vs a genuine extraction failure.
+ */
+export function probeHasAudioStream(filePath: string): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, metadata: FfprobeData) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      const hasAudio = (metadata.streams ?? []).some(
+        (stream) => stream.codec_type === 'audio',
+      );
+      resolve(hasAudio);
+    });
+  });
+}
+
+/**
  * Extracts audio from a processed video file and stores it locally as FLAC.
  * @param {string} processedVideoName - The name of the processed video file.
  * @param {string} audioFileName - The target audio file name (should end with .flac).
  * @returns {Promise<void>} A promise resolved when extraction completes.
  */
-export function extractAudio(
+export async function extractAudio(
   processedVideoName: string,
   audioFileName: string,
 ): Promise<void> {
+  const inputPath = `${localProcessedVideoPath}/${processedVideoName}`;
+
+  // Pre-check with ffprobe so video-only sources become no_audio_detected
+  // without paying ffmpeg extraction CPU or misclassifying as failed.
+  const hasAudioStream = await probeHasAudioStream(inputPath);
+  if (!hasAudioStream) {
+    throw new NoAudioStreamError();
+  }
+
   return new Promise<void>((resolve, reject) => {
-    ffmpeg(`${localProcessedVideoPath}/${processedVideoName}`)
+    ffmpeg(inputPath)
       .noVideo()
       .audioChannels(1)
       .audioFrequency(16000)

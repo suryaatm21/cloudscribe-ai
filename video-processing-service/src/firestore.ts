@@ -38,8 +38,9 @@ export interface Video {
  * pending → running: only `/transcribe-audio` may claim, and only from pending.
  * running → done: GCS notification or sweeper after Speech writes output.
  * running → no_audio_detected: Speech returned a well-formed result with
- *   zero usable speech segments (silent screen recording, etc.). Terminal,
- *   not an error — there is no transcript artifact to sign.
+ *   zero usable speech segments (silent screen recording, etc.), OR the
+ *   source had no audio stream (detected during extraction before Speech).
+ *   Terminal, not an error — there is no transcript artifact to sign.
  * running → failed: Speech (or our pre-RPC validation) definitely never
  *   started, or Speech completed with a recorded error / unparseable output.
  * running → needs_review: Speech RPC may already have been accepted (timeout,

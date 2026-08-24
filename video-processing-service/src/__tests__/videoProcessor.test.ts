@@ -1,5 +1,5 @@
 import { processVideo, uidFromVideoId, videoIdFromFileNames } from "../videoProcessor";
-import { createTranscript, setVideo } from "../firestore";
+import { createTranscript, setVideo, updateTranscriptStatus } from "../firestore";
 import {
   downloadRawVideo,
   convertVideo,
@@ -9,6 +9,7 @@ import {
   extractAudio,
   uploadAudioForTranscription,
   deleteAudioWorkFile,
+  NoAudioStreamError,
 } from "../storage";
 import { publishTranscriptionJob } from "../transcriptionQueue";
 import { serviceConfig } from "../config";
@@ -19,16 +20,20 @@ jest.mock("../firestore", () => ({
   updateTranscriptStatus: jest.fn(),
 }));
 
-jest.mock("../storage", () => ({
-  downloadRawVideo: jest.fn(),
-  convertVideo: jest.fn(),
-  uploadProcessedVideo: jest.fn(),
-  deleteRawVideo: jest.fn(),
-  deleteProcessedVideo: jest.fn(),
-  extractAudio: jest.fn(),
-  uploadAudioForTranscription: jest.fn(),
-  deleteAudioWorkFile: jest.fn(),
-}));
+jest.mock("../storage", () => {
+  const actual = jest.requireActual("../storage") as typeof import("../storage");
+  return {
+    ...actual,
+    downloadRawVideo: jest.fn(),
+    convertVideo: jest.fn(),
+    uploadProcessedVideo: jest.fn(),
+    deleteRawVideo: jest.fn(),
+    deleteProcessedVideo: jest.fn(),
+    extractAudio: jest.fn(),
+    uploadAudioForTranscription: jest.fn(),
+    deleteAudioWorkFile: jest.fn(),
+  };
+});
 
 jest.mock("../transcriptionQueue", () => ({
   publishTranscriptionJob: jest.fn(),
@@ -122,6 +127,64 @@ describe("processVideo", () => {
       audioGcsUri: "gs://atmuri-yt-audio-work/user123-1762753390224.flac",
       userId,
     });
+  });
+
+  it("marks no_audio_detected when the source has no audio stream", async () => {
+    serviceConfig.enableTranscription = true;
+    (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
+    (convertVideo as jest.Mock).mockResolvedValue(undefined);
+    (uploadProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
+    (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    (extractAudio as jest.Mock).mockRejectedValue(new NoAudioStreamError());
+    (createTranscript as jest.Mock).mockResolvedValue(undefined);
+
+    await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
+
+    expect(createTranscript).toHaveBeenCalledWith(
+      videoId,
+      "primary",
+      expect.objectContaining({
+        status: "no_audio_detected",
+        source: "batch",
+        userId,
+        segmentCount: 0,
+        durationSeconds: 0,
+      }),
+    );
+    expect(publishTranscriptionJob).not.toHaveBeenCalled();
+    expect(uploadAudioForTranscription).not.toHaveBeenCalled();
+    expect(updateTranscriptStatus).not.toHaveBeenCalledWith(
+      videoId,
+      "primary",
+      "failed",
+      expect.anything(),
+    );
+  });
+
+  it("marks failed for a genuine extraction error", async () => {
+    serviceConfig.enableTranscription = true;
+    (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
+    (convertVideo as jest.Mock).mockResolvedValue(undefined);
+    (uploadProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
+    (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    (extractAudio as jest.Mock).mockRejectedValue(
+      new Error("disk write failed"),
+    );
+    (updateTranscriptStatus as jest.Mock).mockResolvedValue(true);
+    (deleteAudioWorkFile as jest.Mock).mockResolvedValue(undefined);
+
+    await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
+
+    expect(updateTranscriptStatus).toHaveBeenCalledWith(
+      videoId,
+      "primary",
+      "failed",
+      { error: "disk write failed" },
+    );
+    expect(createTranscript).not.toHaveBeenCalled();
+    expect(publishTranscriptionJob).not.toHaveBeenCalled();
   });
 
   it("retries up to configured attempts and marks failure", async () => {

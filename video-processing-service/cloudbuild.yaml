@@ -74,11 +74,28 @@ steps:
 # Default stays off. Infra is provisioned; flip the GitHub trigger
 # substitution `_ENABLE_TRANSCRIPTION=true` only when turning transcription
 # on. Confirmed trigger: name `video-processing-service`,
-# region `global` (`gcloud builds triggers list --project=yt-clone-385f4`):
+# region `global` (`gcloud builds triggers list --project=yt-clone-385f4`).
+#
+# Live trigger substitutions (2026-08-24, read-only describe):
+#   _ENABLE_TRANSCRIPTION: 'true'
+#   _SPEECH_PROCESSING_STRATEGY: STANDARD
+#   _TRANSCRIPTS_BUCKET_NAME: atmuri-yt-transcripts
+#   _AUDIO_WORK_BUCKET_NAME: atmuri-yt-audio-work
+#   _TRANSCRIPTION_TOPIC_NAME: transcription-jobs
+#
+# Do NOT use `--update-substitutions=_ENABLE_TRANSCRIPTION=true` alone — it
+# returns INVALID_ARGUMENT on the current SDK/trigger. Export, edit, re-import:
+#
+#   gcloud builds triggers describe video-processing-service \
+#     --region=global --project=yt-clone-385f4 \
+#     --format=yaml > /tmp/video-processing-service-trigger.yaml
+#   # Edit the substitutions block in the exported file.
 #   gcloud builds triggers update github video-processing-service \
 #     --region=global --project=yt-clone-385f4 \
-#     --update-substitutions=_ENABLE_TRANSCRIPTION=true
+#     --trigger-config=/tmp/video-processing-service-trigger.yaml
 #
+# To flip transcription on, set `_ENABLE_TRANSCRIPTION: 'true'` in that file
+# (keep the other substitution keys unchanged unless intentionally changing them).
 # LAUNCH BLOCKER: `_SPEECH_PROCESSING_STRATEGY` defaults to STANDARD (fast,
 # ~$0.016/min, 5× DYNAMIC_BATCHING). Before production lecture audio, set
 # `_SPEECH_PROCESSING_STRATEGY=DYNAMIC_BATCHING` on the same trigger.
