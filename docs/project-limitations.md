@@ -25,13 +25,22 @@
 - **Potential Solution:**
   - Use a shared types package (e.g., `utils/types/video.ts`) and import it everywhere (backend, frontend, functions) for end-to-end type safety.
 
-## Processed Video Quality And Raw Retention
+## Processed Video Quality, Raw Retention, And OCR
 
 - **Current:** `convertVideo` no longer applies `-vf scale=-1:360`. Sprint 2 dropped the downscale so the processed object (and the FLAC extracted from it) keep source resolution. Raw objects in `atmuri-yt-raw-videos` are also never deleted; `deleteRawVideo` only removes the local temp copy.
 - **Tradeoff:** Processed videos and raw originals consume more storage than a 360p pipeline with raw expiry.
-- **Potential Solutions:**
-  - Reintroduce an explicit, configurable scale filter if product wants a standard watch resolution.
+- **Constraint (load-bearing for OCR):** original resolution is required for usable OCR on slides, diagrams, and equations. OCR on 360p slides is poor; subscripts and exponents become unreadable. If anyone later reintroduces downscaling to reduce egress, OCR quality degrades **silently** — the visual pipeline will still report success. This coupling is part of the lecture-content design ([`docs/features/multimodal-lecture-content.md`](features/multimodal-lecture-content.md)); keep it visible from the transcode side too.
+- **Potential Solutions (watch path only, not OCR):**
+  - Add a **separate** watch rendition if product wants 360p playback, and keep a full-resolution object for visual analysis. Do not reuse a downscaled watch file as the OCR source.
   - Add lifecycle expiry on the raw bucket (tracked for the security-hardening pass).
+
+## Firestore Rules And Frame Privacy
+
+- **Current:** the repo has **no Firestore security rules**. Processed playback objects are `makePublic()`. Owner-only rules and signed video URLs are a planned security pass, not done. `atmuri-yt-raw-videos` and `atmuri-yt-processed-videos` do **not** have uniform bucket-level access, which is why `makePublic()` on processed videos works today.
+- **Decided (parallel tracks):** frame extraction may proceed while that security pass is still in flight. Frames are never publicly readable. Any frames bucket **must** be created with uniform bucket-level access — the same flag used for `atmuri-yt-transcripts` and `atmuri-yt-audio-work` in [`scripts/setup-transcription-infra.sh`](../scripts/setup-transcription-infra.sh) — so per-object ACLs are unavailable and `makePublic()` **fails** rather than silently succeeding. That requirement is a precondition of storing the first frame, not a follow-up. Frames are served only through short-lived signed URLs, following the transcript pattern.
+- **Residual risk:** uniform access solves object privacy. It does not solve document privacy. Until Firestore rules exist, frame **metadata** (paths, timestamps, ownership) is readable by any authenticated user. Those are separate controls; only the object-ACL class is being made impossible by construction in parallel with extraction.
+- **Tradeoff:** extracted lecture frames (specified, not built) are a different risk class than transcripts: images of course material, potentially copyrighted, potentially containing other students’ faces. A leaked frame URL is a still of the lecture. A leaked Firestore path is still a leak of what was stored, even if the JPEG itself is private.
+- **Potential Solutions:** keep the frames bucket on uniform access from birth; ship owner-only Firestore rules and signed video URLs on the security branch without blocking step-3 frame storage on that branch landing. See the privacy finding in [`docs/features/multimodal-lecture-content.md`](features/multimodal-lecture-content.md).
 
 ## Video ID/Processing Strategy
 

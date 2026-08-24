@@ -1,27 +1,40 @@
 # Sprint 5 – Study Chatbot
 
+**Status:** specified only. Not implemented.
+
+## Contract
+
+Chat retrieves lecture-content chunks (Sprint 4) and answers with citations. A citation must be able to point at **both** a video timestamp **and** an extracted frame when one exists. Transcript-only chunks still cite timestamps. Visual-only chunks cite a frame and a timestamp and have no spoken quote.
+
+**Degraded visual-only** (transcription `failed`, slide notes only) differs from **complete visual-only** (`no_audio_detected`, silent slides). In both cases there is no spoken quote, but degraded chunks also **cannot cite spoken timestamps** — there is no transcript segment to anchor to. Citations may still reference frame capture time and frame URI. The UI should not imply a spoken passage exists when notes were generated from slides after transcription failure. See Decision 3 in [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
+
+Do not cite a frame that was not stored.
+
+Identity is `videoId`. Downstream stays independent of whether the lecture-content was produced by batch upload or live capture. Design: [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
+
 ## Sprint Goal
 Expose a grounded Q&A experience in the web client that queries the RAG store and uses Gemini to answer with citations tied to user content.
 
 ## Deliverables
-- Cloud Run chat service with `POST /chat` endpoint that validates Firebase auth, retrieves context from RAG, and calls Gemini for grounded responses (Acceptance: sample query returns answer referencing at least 2 chunks with citations).
-- Conversation persistence model storing prompts, responses, cited chunk IDs, and latency metrics (Acceptance: Firestore `Conversations` collection records each turn with userId/workspaceId).
-- Web client chat UI (minimal) gated by feature flag showing conversation history and citations (Acceptance: UI displays streaming text or final response within 10s, hide flag keeps feature off).
+- Cloud Run chat service with `POST /chat` endpoint that validates Firebase auth, retrieves context from Firestore `findNearest`, and calls Gemini for grounded responses (Acceptance: sample query returns an answer referencing at least 2 chunks; each citation includes `videoId`, timestamp range, and a frame URI when the chunk has one).
+- Conversation persistence model storing prompts, responses, cited chunk IDs (with timestamp + frame refs), and latency metrics (Acceptance: Firestore `Conversations` collection records each turn with userId/workspaceId).
+- Web client chat UI (minimal) gated by feature flag showing conversation history and citations (Acceptance: UI displays streaming text or final response within 10s; a citation can deep-link to the watch timestamp and, when present, show the stored frame; hide flag keeps feature off).
 
 ## Technical Tasks
 - Implement retrieval call with filters (workspaceId + userId) and rank top chunks; include fallback if no context returned.
-- Build Gemini request payload enforcing citation template + safety settings.
+- Build Gemini request payload enforcing a citation template that can emit timestamp range **and** frame URI (omit frame when `visuals` were empty) + safety settings. For degraded visual-only chunks, omit spoken-timestamp anchors; frame time and URI remain valid.
 - Add rate limiting + quota enforcement per user to prevent abuse.
-- Update upload/job metadata to link transcripts/notes/retrieval artifacts for quick lookups.
-- Instrument tracing/logging for questionId across chat + RAG calls.
+- Update upload/job metadata to link lecture-content / notes / retrieval artifacts for quick lookups. Do not key anything on `lectureId`.
+- Instrument tracing/logging for questionId across chat + retrieval calls.
+- Frame URLs used in citations must not assume public GCS ACLs. Serve frames through short-lived signed URLs, same pattern as transcripts. Processed videos are already `makePublic()` because `atmuri-yt-processed-videos` does **not** have uniform bucket-level access; frames must not repeat that. Any frames bucket is created with uniform access so `makePublic()` fails rather than silently succeeding. There are **no Firestore security rules** in the repo today — citation UIs that read frame **metadata** (paths, timestamps, ownership) from Firestore still leak to any authenticated user until those rules exist. Object privacy and document privacy are separate controls. See the privacy finding in [`multimodal-lecture-content.md`](multimodal-lecture-content.md).
 - SPIKE – Evaluate WebSocket vs long-polling for response streaming; document choice (MVP may use simple polling).
 
 ## Dependencies
-- RAG indexing pipeline producing searchable datastore.
-- Notes + transcript metadata accessible with workspace scoping.
+- RAG indexing pipeline producing searchable Firestore chunks from lecture-content.
+- Notes + lecture-content metadata accessible with workspace scoping. Transcript-only and visual-only lecture-content are both valid corpora. Genuinely empty lectures are not.
 
 ## Success Metrics
-- Chatbot answers 5 curated questions with correct citations referencing user material.
+- Chatbot answers 5 curated questions with correct citations referencing user material (timestamps always; frames when the chunk has them).
 - Median response latency <10s including retrieval + generation.
 - No unauthorized access between workspaces observed in audit logs.
 
