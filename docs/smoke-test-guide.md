@@ -9,6 +9,25 @@ The smoke test validates the entire pipeline: upload → Pub/Sub → processing 
 - Access to the GCP project (`yt-clone-385f4`)
 - A test video file (or `ffmpeg` to generate one)
 
+### Test video caveat: `test-video.mp4` is video-only
+
+The repo's bundled `test-video.mp4` (and the common smoke-test recipe below) is **video-only** — it has no audio track. That is fine for validating upload → transcode → Firestore, but it **cannot** exercise transcription. A video-only upload should end with transcript status `no_audio_detected`, not a signed transcript.
+
+To generate a local fixture **with** an audio track (still no speech — a sine tone validates extraction and the silent-audio path, not transcript parsing):
+
+```bash
+ffmpeg -f lavfi -i testsrc=s=640x360:d=5 -f lavfi -i sine=f=440:d=5 \
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest test-video-with-audio.mp4
+```
+
+Testing real transcript output requires actual spoken audio in the fixture. The generated file is gitignored; do not commit it.
+
+The video-only smoke fixture:
+
+```bash
+ffmpeg -f lavfi -i testsrc=s=1920x1080:d=5 -pix_fmt yuv420p test-video.mp4
+```
+
 ## Step 1: Generate a Firebase ID Token
 
 The smoke test requires a valid Firebase ID token to authenticate with the `getUploadUrl` Firebase Function.

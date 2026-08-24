@@ -7,7 +7,9 @@ import {
   extractAudio,
   uploadAudioForTranscription,
   deleteAudioWorkFile,
+  isNoAudioStreamError,
 } from "./storage";
+import { Timestamp } from "firebase-admin/firestore";
 import {
   createTranscript,
   setVideo,
@@ -213,6 +215,25 @@ async function triggerTranscriptionPipeline(
       transcriptId,
     });
   } catch (err) {
+    if (isNoAudioStreamError(err)) {
+      logger.info("Source has no audio stream; marking no_audio_detected", {
+        component: "videoProcessor",
+        videoId,
+        transcriptId,
+      });
+      await createTranscript(videoId, transcriptId, {
+        status: "no_audio_detected",
+        source: "batch",
+        language: serviceConfig.speechToTextLanguage,
+        model: serviceConfig.speechToTextModel,
+        userId,
+        segmentCount: 0,
+        durationSeconds: 0,
+        completedAt: Timestamp.now(),
+      });
+      return;
+    }
+
     const message = err instanceof Error ? err.message : String(err);
     logger.error("Failed to queue transcription job", {
       component: "videoProcessor",

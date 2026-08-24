@@ -88,7 +88,11 @@ async function generateToken() {
     console.log("\n🚀 Quick Start:\n");
     console.log("# 1. Set environment variables (copy-paste above)");
     console.log("# 2. Create a test video (or use an existing one):");
+    console.log('   # Video-only — fine for upload/transcode smoke, NOT transcription:');
     console.log('   ffmpeg -f lavfi -i testsrc=s=1920x1080:d=5 -pix_fmt yuv420p test-video.mp4');
+    console.log('   # With audio track (sine tone — no speech; for transcription path smoke):');
+    console.log('   ffmpeg -f lavfi -i testsrc=s=640x360:d=5 -f lavfi -i sine=f=440:d=5 \\');
+    console.log('     -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest test-video-with-audio.mp4');
     console.log("# 3. Run smoke test:");
     console.log("   cd /Users/Surya/Projects/cloudscribe-ai");
     console.log("   export SMOKE_TEST_FILE=$(pwd)/test-video.mp4");
