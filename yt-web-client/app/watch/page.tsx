@@ -9,7 +9,6 @@ import {
   orderBy,
   query,
 } from "firebase/firestore";
-import { User } from "firebase/auth";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { db, onAuthStateChangedHelper } from "../firebase/firebase";
@@ -47,6 +46,8 @@ interface TranscriptPayload {
   durationSeconds?: number;
 }
 
+type AuthStatus = "loading" | "signed-out" | "signed-in";
+
 type SubscriptionState =
   | "loading"
   | "ready"
@@ -81,7 +82,7 @@ function WatchContent() {
   const params = useSearchParams();
   const videoId = params.get("id");
 
-  const [user, setUser] = useState<User | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
   const [video, setVideo] = useState<Video | null>(null);
   const [videoState, setVideoState] = useState<SubscriptionState>("loading");
   const [transcriptMeta, setTranscriptMeta] = useState<TranscriptMeta | null>(
@@ -100,13 +101,23 @@ function WatchContent() {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChangedHelper((nextUser) => {
-      setUser(nextUser);
+      setAuthStatus(nextUser ? "signed-in" : "signed-out");
     });
     return () => unsubscribe();
   }, []);
 
   useEffect(() => {
     if (!videoId) {
+      return;
+    }
+
+    if (authStatus === "loading") {
+      return;
+    }
+
+    if (authStatus === "signed-out") {
+      setVideo(null);
+      setVideoState("permission-denied");
       return;
     }
 
@@ -130,10 +141,20 @@ function WatchContent() {
       },
     );
     return () => unsubscribe();
-  }, [videoId]);
+  }, [videoId, authStatus]);
 
   useEffect(() => {
     if (!videoId) {
+      return;
+    }
+
+    if (authStatus === "loading") {
+      return;
+    }
+
+    if (authStatus === "signed-out") {
+      setTranscriptMeta(null);
+      setTranscriptState("permission-denied");
       return;
     }
 
@@ -162,7 +183,7 @@ function WatchContent() {
       },
     );
     return () => unsubscribe();
-  }, [videoId]);
+  }, [videoId, authStatus]);
 
   useEffect(() => {
     if (
@@ -210,7 +231,7 @@ function WatchContent() {
     };
   }, [videoId, transcriptMeta, loadedTranscriptId]);
 
-  const signedIn = user !== null;
+  const signedIn = authStatus === "signed-in";
 
   const transcriptStatusLabel = useMemo(() => {
     if (transcriptState === "loading") {
