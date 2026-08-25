@@ -3,14 +3,16 @@
 import {
   collection,
   doc,
+  FirestoreError,
   limit,
   onSnapshot,
   orderBy,
   query,
 } from "firebase/firestore";
+import { User } from "firebase/auth";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { db } from "../firebase/firebase";
+import { db, onAuthStateChangedHelper } from "../firebase/firebase";
 import {
   Video,
   getTranscriptUrl,
@@ -45,18 +47,48 @@ interface TranscriptPayload {
   durationSeconds?: number;
 }
 
+type SubscriptionState =
+  | "loading"
+  | "ready"
+  | "not-found"
+  | "permission-denied"
+  | "error";
+
 const PROCESSED_BASE =
   process.env.NEXT_PUBLIC_PROCESSED_BASE ??
   "https://storage.googleapis.com/atmuri-yt-processed-videos/";
+
+function permissionDeniedMessage(signedIn: boolean, resource: "video" | "transcript") {
+  if (!signedIn) {
+    return resource === "video"
+      ? "Sign in to view this video."
+      : "Sign in to view the transcript.";
+  }
+  return resource === "video"
+    ? "You don't have access to this video."
+    : "You don't have access to this transcript.";
+}
+
+function snapshotErrorState(error: FirestoreError): SubscriptionState {
+  if (error.code === "permission-denied") {
+    return "permission-denied";
+  }
+  console.error("Firestore subscription error:", error);
+  return "error";
+}
 
 function WatchContent() {
   const params = useSearchParams();
   const videoId = params.get("id");
 
+  const [user, setUser] = useState<User | null>(null);
   const [video, setVideo] = useState<Video | null>(null);
+  const [videoState, setVideoState] = useState<SubscriptionState>("loading");
   const [transcriptMeta, setTranscriptMeta] = useState<TranscriptMeta | null>(
     null,
   );
+  const [transcriptState, setTranscriptState] =
+    useState<SubscriptionState>("loading");
   const [transcriptData, setTranscriptData] = useState<TranscriptPayload | null>(
     null,
   );
@@ -67,16 +99,36 @@ function WatchContent() {
   );
 
   useEffect(() => {
+    const unsubscribe = onAuthStateChangedHelper((nextUser) => {
+      setUser(nextUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
     if (!videoId) {
       return;
     }
-    const unsubscribe = onSnapshot(doc(db, "videos", videoId), (snapshot) => {
-      if (!snapshot.exists()) {
+
+    setVideo(null);
+    setVideoState("loading");
+
+    const unsubscribe = onSnapshot(
+      doc(db, "videos", videoId),
+      (snapshot) => {
+        if (!snapshot.exists()) {
+          setVideo(null);
+          setVideoState("not-found");
+          return;
+        }
+        setVideo({ ...(snapshot.data() as Video), id: snapshot.id });
+        setVideoState("ready");
+      },
+      (error) => {
         setVideo(null);
-        return;
-      }
-      setVideo({ ...(snapshot.data() as Video), id: snapshot.id });
-    });
+        setVideoState(snapshotErrorState(error));
+      },
+    );
     return () => unsubscribe();
   }, [videoId]);
 
@@ -84,19 +136,31 @@ function WatchContent() {
     if (!videoId) {
       return;
     }
+
+    setTranscriptMeta(null);
+    setTranscriptState("loading");
+
     const transcriptsRef = collection(db, "videos", videoId, "transcripts");
     const q = query(transcriptsRef, orderBy("createdAt", "desc"), limit(1));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      if (snapshot.empty) {
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        if (snapshot.empty) {
+          setTranscriptMeta(null);
+        } else {
+          const data = snapshot.docs[0].data() as Omit<TranscriptMeta, "id">;
+          setTranscriptMeta({
+            ...data,
+            id: snapshot.docs[0].id,
+          });
+        }
+        setTranscriptState("ready");
+      },
+      (error) => {
         setTranscriptMeta(null);
-        return;
-      }
-      const data = snapshot.docs[0].data() as Omit<TranscriptMeta, "id">;
-      setTranscriptMeta({
-        ...data,
-        id: snapshot.docs[0].id,
-      });
-    });
+        setTranscriptState(snapshotErrorState(error));
+      },
+    );
     return () => unsubscribe();
   }, [videoId]);
 
@@ -146,7 +210,18 @@ function WatchContent() {
     };
   }, [videoId, transcriptMeta, loadedTranscriptId]);
 
+  const signedIn = user !== null;
+
   const transcriptStatusLabel = useMemo(() => {
+    if (transcriptState === "loading") {
+      return "Loading transcript status...";
+    }
+    if (transcriptState === "permission-denied") {
+      return permissionDeniedMessage(signedIn, "transcript");
+    }
+    if (transcriptState === "error") {
+      return "Unable to load transcript status";
+    }
     if (!transcriptMeta) {
       return "Waiting for transcription job to start";
     }
@@ -166,7 +241,7 @@ function WatchContent() {
       default:
         return "Transcription status unknown";
     }
-  }, [transcriptMeta]);
+  }, [transcriptMeta, transcriptState, signedIn]);
 
   if (!videoId) {
     return <div className={styles.page}>Missing video identifier.</div>;
@@ -176,7 +251,19 @@ function WatchContent() {
     <div className={styles.page}>
       <section>
         <h1 className={styles.title}>Watch</h1>
-        {video?.filename ? (
+        {videoState === "loading" && <div>Loading video metadata...</div>}
+        {videoState === "not-found" && (
+          <p className={styles.error}>This video could not be found.</p>
+        )}
+        {videoState === "permission-denied" && (
+          <p className={styles.error}>
+            {permissionDeniedMessage(signedIn, "video")}
+          </p>
+        )}
+        {videoState === "error" && (
+          <p className={styles.error}>Unable to load video metadata.</p>
+        )}
+        {videoState === "ready" && video?.filename && (
           <video
             controls
             preload="metadata"
@@ -185,8 +272,6 @@ function WatchContent() {
             <source src={`${PROCESSED_BASE}${video.filename}`} type="video/mp4" />
             Your browser does not support HTML5 video.
           </video>
-        ) : (
-          <div>Loading video metadata...</div>
         )}
       </section>
 
@@ -195,26 +280,37 @@ function WatchContent() {
           <h2 className={styles.transcriptTitle}>Transcript</h2>
           <span className={styles.status}>{transcriptStatusLabel}</span>
         </div>
+        {transcriptState === "permission-denied" && (
+          <p className={styles.error}>
+            {permissionDeniedMessage(signedIn, "transcript")}
+          </p>
+        )}
+        {transcriptState === "error" && (
+          <p className={styles.error}>Unable to load transcript status.</p>
+        )}
         {isTranscriptLoading && <p>Loading transcript...</p>}
         {transcriptError && <p className={styles.error}>{transcriptError}</p>}
-        {transcriptMeta?.status === "failed" && (
+        {transcriptState === "ready" && transcriptMeta?.status === "failed" && (
           <p className={styles.error}>
             Transcription failed. Please retry the upload.
           </p>
         )}
-        {transcriptMeta?.status === "no_audio_detected" && (
+        {transcriptState === "ready" &&
+          transcriptMeta?.status === "no_audio_detected" && (
           <p className={styles.muted}>
             No speech detected in this video
           </p>
         )}
-        {transcriptMeta?.status !== "done" &&
+        {transcriptState === "ready" &&
+          transcriptMeta?.status !== "done" &&
           transcriptMeta?.status !== "no_audio_detected" &&
           !transcriptError && (
           <p className={styles.muted}>
             Transcript will appear here once processing finishes.
           </p>
         )}
-        {transcriptMeta?.status === "done" &&
+        {transcriptState === "ready" &&
+          transcriptMeta?.status === "done" &&
           transcriptData?.segments &&
           transcriptData.segments.length > 0 && (
             <div className={styles.segments}>
