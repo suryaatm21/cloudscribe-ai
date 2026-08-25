@@ -28,3 +28,29 @@ Enable automated Speech-to-Text v2 processing for uploaded media so transcripts 
 ## Deferred Complexity
 - Multi-language auto-detection; MVP requires user to select language.
 - Speaker diarization; focus on single speaker transcripts first.
+
+## Observed Speech v2 GCS result shape
+
+**Status: observed in production (2026-08-24)** — no longer assumed from documentation alone.
+
+First real `batchRecognize` output file written by Google to the transcripts bucket:
+
+`gs://atmuri-yt-transcripts/raw/zUBGbRycgiOhdHgFZtbDycYw1SH3-1787577056297/primary/zUBGbRycgiOhdHgFZtbDycYw1SH3-1787577056297_transcript_6f46350e-0000-2a5c-b47f-c82add6ec714.json`
+
+Exact payload (220 bytes, single-line JSON):
+
+```json
+{"results":[{"alternatives":[{"transcript":"hmm","confidence":0.16799638,"words":[{"startOffset":"0.700s","endOffset":"2.200s","word":"hmm","confidence":0.16799638}]}],"resultEndOffset":"3.610s","languageCode":"en-us"}]}
+```
+
+Properties confirmed on real output:
+
+| Property | Observed value | Parser behavior |
+| --- | --- | --- |
+| Top-level `metadata` | **Absent** | Not required; prior test fixture incorrectly included `totalBilledDuration` |
+| Duration encoding | Proto3 strings (`"0.700s"`) | Parsed via `durationToSeconds` |
+| `languageCode` | Lowercase `"en-us"` (request was `"en-US"`) | Ignored; normalized payload uses configured language |
+| Per-word `confidence` | Present on each word | Ignored; segment confidence from alternative level |
+| camelCase | Throughout | Expected |
+
+Test fixtures: observed copy at `video-processing-service/src/__tests__/fixtures/speech-v2-batch-results-observed.json`; synthetic defensive coverage at `speech-v2-batch-results-synthetic.json` (multi-segment, `{seconds,nanos}` durations).
