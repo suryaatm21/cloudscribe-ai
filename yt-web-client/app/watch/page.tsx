@@ -155,6 +155,10 @@ function WatchContent() {
     if (authStatus === "signed-out") {
       setTranscriptMeta(null);
       setTranscriptState("permission-denied");
+      setIsTranscriptLoading(false);
+      setTranscriptError(null);
+      setTranscriptData(null);
+      setLoadedTranscriptId(null);
       return;
     }
 
