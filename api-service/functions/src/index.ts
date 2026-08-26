@@ -160,6 +160,7 @@ export const getVideos = onCall({maxInstances: 1}, async (request) => {
   }
   const querySnapshot = await firestore
     .collection(videoCollectionId)
+    .where("uid", "==", request.auth.uid)
     .limit(10)
     .get();
   return querySnapshot.docs.map((doc) => doc.data());
