@@ -64,6 +64,22 @@ This document captures all required environment variables, service accounts, and
 
 - Firebase admin SDK default service account requires `roles/storage.objectCreator` on the raw bucket to issue signed URLs.
 
+**Transcripts bucket CORS**
+
+Normalized transcripts are fetched in the browser via V4 signed URLs from `getTranscriptUrl`. GCS CORS matches the request `Origin` header exactly, so every hostname the web client can be served from must appear in the bucket CORS allowlist.
+
+Cloud Run service `cloudscribe-ai` is reachable on **two** hostnames (see `run.googleapis.com/urls` on the service): the project-number form (`https://cloudscribe-ai-262816123746.us-central1.run.app`, the durable URL) and the legacy hash form (`https://cloudscribe-ai-rfrkdig5jq-uc.a.run.app`). Both must be listed. Firebase Hosting domains and local dev are listed too.
+
+Canonical config: [`utils/gcs-cors-transcripts.json`](../utils/gcs-cors-transcripts.json). Applied idempotently by `scripts/setup-transcription-infra.sh`:
+
+```bash
+gcloud storage buckets update gs://atmuri-yt-transcripts \
+  --cors-file=utils/gcs-cors-transcripts.json \
+  --project=yt-clone-385f4
+```
+
+Local dev runs `next dev` on port 3000 (`yt-web-client/package.json`), so the CORS file allows `http://localhost:3000` only.
+
 **Transcription signing IAM**
 
 `scripts/setup-transcription-infra.sh` grants `roles/storage.objectViewer` on the transcripts bucket to the Firebase Functions runtime identity so `getTranscriptUrl` can mint V4 signed URLs.

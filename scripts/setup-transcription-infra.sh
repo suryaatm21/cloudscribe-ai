@@ -23,6 +23,7 @@ Creates the infrastructure required for Sprint 2 transcription:
   1. Enable Speech-to-Text, Pub/Sub, Cloud Scheduler, Storage, Run, and IAM APIs
   2. Preflight iam.serviceAccounts.actAs on the push identity (IAM REST)
   3. Transcripts + audio-work buckets (lifecycle expiry, not retention lock)
+     and transcripts-bucket CORS for signed-URL fetches from the web client
   4. Push subscriptions to /transcribe-audio and /transcript-ready (create or update)
   5. DLQ topics AND DLQ subscriptions (create or update)
   6. Pub/Sub service-agent IAM required for dead-lettering
@@ -493,6 +494,17 @@ EOF
 echo "===> Ensuring buckets..."
 ensure_bucket "$TRANSCRIPTS_BUCKET_NAME" "$TRANSCRIPTS_LIFECYCLE"
 ensure_bucket "$AUDIO_WORK_BUCKET_NAME" "$AUDIO_LIFECYCLE"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRANSCRIPTS_CORS_FILE="${SCRIPT_DIR}/../utils/gcs-cors-transcripts.json"
+if [[ ! -f "$TRANSCRIPTS_CORS_FILE" ]]; then
+  echo "ERROR: missing transcripts CORS file at ${TRANSCRIPTS_CORS_FILE}."
+  exit 1
+fi
+echo "Applying transcripts bucket CORS from ${TRANSCRIPTS_CORS_FILE}..."
+gcloud storage buckets update "gs://${TRANSCRIPTS_BUCKET_NAME}" \
+  --cors-file="$TRANSCRIPTS_CORS_FILE" \
+  --project "$PROJECT_ID"
 
 echo "===> Ensuring Pub/Sub topics..."
 ensure_topic "$JOBS_TOPIC"
