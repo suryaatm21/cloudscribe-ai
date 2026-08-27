@@ -1,0 +1,33 @@
+# Cloud Build configuration for api-service (Firebase Cloud Functions)
+# Triggered automatically when you push to GitHub (api-service/** on main).
+#
+# Deploys Cloud Functions only. Firestore rules and indexes in firebase.json
+# are intentionally excluded — they require deliberate, separate deploys.
+#
+# Predeploy hooks in firebase.json run lint + build before upload; a lint or
+# compile failure blocks the deploy rather than shipping broken code.
+
+steps:
+  # Step 0: Install dependencies, then deploy functions via Firebase CLI.
+  # Uses node:22 to match functions/package.json engines.node.
+  # firebase-tools is not in gcr.io/cloud-builders/*; install it here rather
+  # than relying on an unofficial community image.
+  - name: "node:22"
+    dir: "api-service"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -euo pipefail
+        npm install -g firebase-tools@14
+        npm ci --prefix functions
+        firebase deploy --only functions --non-interactive --project "$PROJECT_ID"
+
+# Sized for E2_STANDARD_2 (2 vCPU). Functions predeploy (lint + tsc) plus
+# firebase deploy (source upload + Cloud Build for gen2 containers) can run
+# several minutes on 2 vCPU; allow 20 minutes.
+timeout: "1200s"
+
+options:
+  machineType: "E2_STANDARD_2"
+  logging: CLOUD_LOGGING_ONLY

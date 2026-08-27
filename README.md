@@ -178,16 +178,19 @@ End-to-end smoke (deployed Functions + worker): [`docs/smoke-test-guide.md`](doc
 
 ## Deploy
 
-Two Cloud Build triggers fire on **push to `main`** only (`^main$`):
+Three Cloud Build triggers fire on **push to `main`** only (`^main$`):
 
-| Trigger | Config | Cloud Run service |
+| Trigger | Config | Deploys |
 | --- | --- | --- |
-| `video-processing-service` | [`video-processing-service/cloudbuild.yaml`](video-processing-service/cloudbuild.yaml) | `video-processing-service`, `--ingress=internal`, 2Gi / 1 CPU, max 1 instance |
-| `web-client` | [`yt-web-client/cloudbuild.yaml`](yt-web-client/cloudbuild.yaml) | `cloudscribe-ai`, public |
+| `video-processing-service` | [`video-processing-service/cloudbuild.yaml`](video-processing-service/cloudbuild.yaml) | Cloud Run `video-processing-service`, `--ingress=internal`, 2Gi / 1 CPU, max 1 instance |
+| `web-client` | [`yt-web-client/cloudbuild.yaml`](yt-web-client/cloudbuild.yaml) | Cloud Run `cloudscribe-ai`, public |
+| `api-service` | [`api-service/cloudbuild.yaml`](api-service/cloudbuild.yaml) | Firebase Cloud Functions only (scoped to `api-service/**`) |
 
-Each build: Docker image for `linux/amd64` → Artifact Registry → `gcloud run deploy`. Builds use `E2_STANDARD_2` (the 2,500-minute free SKU). Details: [`docs/cloud-build-setup.md`](docs/cloud-build-setup.md).
+Cloud Run builds: Docker image for `linux/amd64` → Artifact Registry → `gcloud run deploy`. Functions build: `firebase deploy --only functions` with predeploy lint + compile. All builds use `E2_STANDARD_2` (the 2,500-minute free SKU). Details: [`docs/cloud-build-setup.md`](docs/cloud-build-setup.md).
 
-Functions are **not** on those triggers. Deploy them from `api-service` with `firebase deploy --only functions`.
+**Not automated:** Firestore rules and indexes. Deploy deliberately with `firebase deploy --only firestore:rules` or `firestore:indexes`. Without that separation, a Functions-only merge could silently change production rules (the same divergence class that bit this project before).
+
+Manual fallback: `cd api-service && firebase deploy --only functions`.
 
 Sprint 2 code is already on `main` and on Cloud Run, with `ENABLE_TRANSCRIPTION` defaulting **off**. The flag is set explicitly via the Cloud Build substitution `_ENABLE_TRANSCRIPTION` (also `"false"`). Transcription buckets, topics, subscriptions, the `raw/` GCS notification, and Cloud Scheduler `reconcile-transcripts` (every 15 minutes) **exist** and the setup script was verified idempotent. Remaining sequence: keep the flag off until the gated sweeper is deployed, set `_SPEECH_PROCESSING_STRATEGY=DYNAMIC_BATCHING` (the code default is `STANDARD`, 5× the batch price), then flip `_ENABLE_TRANSCRIPTION=true`. Transcription has not been exercised end to end — no Speech call has been made.
 
