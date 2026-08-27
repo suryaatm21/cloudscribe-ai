@@ -120,6 +120,12 @@ describe("transcription module", () => {
       "utf8",
     ),
   );
+  const gettysburgFixture = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, "fixtures/speech-v2-batch-results-observed-gettysburg.json"),
+      "utf8",
+    ),
+  );
   const syntheticFixture = JSON.parse(
     fs.readFileSync(
       path.join(__dirname, "fixtures/speech-v2-batch-results-synthetic.json"),
@@ -226,15 +232,23 @@ describe("transcription module", () => {
       startTime: 0.7,
       endTime: 2.2,
       confidence: 0.16799638,
+      words: [
+        {
+          word: "hmm",
+          startTime: 0.7,
+          endTime: 2.2,
+          confidence: 0.16799638,
+        },
+      ],
     });
     expect(payload.durationSeconds).toBe(2.2);
     expect(payload.language).toBe("en-US");
   });
 
-  it("ignores per-word confidence and lowercase languageCode from observed output", () => {
+  it("preserves per-word confidence separately from segment confidence", () => {
     const payload = buildTranscriptPayload("video-7", observedFixture);
     expect(payload.segments[0].confidence).toBe(0.16799638);
-    expect(payload.language).toBe("en-US");
+    expect(payload.segments[0].words?.[0].confidence).toBe(0.16799638);
   });
 
   it("maps a synthetic multi-segment Speech v2 fixture into ITranscriptPayload", () => {
@@ -246,9 +260,46 @@ describe("transcription module", () => {
       startTime: 0,
       endTime: 1.2,
       confidence: 0.94,
+      words: [
+        { word: "Hello", startTime: 0, endTime: 0.4, confidence: 0.98 },
+        { word: "world.", startTime: 0.4, endTime: 1.2, confidence: 0.91 },
+      ],
     });
     expect(payload.segments[1].text).toBe("This is a test.");
+    expect(payload.segments[1].words).toHaveLength(2);
     expect(payload.durationSeconds).toBe(2.4);
+  });
+
+  it("maps observed Gettysburg Speech v2 output with 22 segments and 328 words", () => {
+    const payload = buildTranscriptPayload(
+      "zUBGbRycgiOhdHgFZtbDycYw1SH3-1787788487732",
+      gettysburgFixture,
+    );
+    expect(payload.segments).toHaveLength(22);
+    const wordCount = payload.segments.reduce(
+      (sum, segment) => sum + (segment.words?.length ?? 0),
+      0,
+    );
+    expect(wordCount).toBe(328);
+    expect(payload.durationSeconds).toBeCloseTo(153.97, 1);
+    expect(payload.segments[0].words?.[1]).toEqual({
+      word: "is",
+      startTime: 2.5,
+      endTime: 2.5,
+      confidence: 0.9986429,
+    });
+    const lowConfidenceWords = payload.segments.flatMap(
+      (segment) => segment.words ?? [],
+    ).filter((word) => (word.confidence ?? 1) < 0.5);
+    expect(lowConfidenceWords.length).toBeGreaterThanOrEqual(4);
+    expect(lowConfidenceWords.some((word) => word.word === "19")).toBe(true);
+  });
+
+  it("preserves zero-length word offsets as instantaneous markers", () => {
+    const payload = buildTranscriptPayload("video-7", gettysburgFixture);
+    const zeroLength = payload.segments.flatMap((segment) => segment.words ?? [])
+      .filter((word) => word.startTime === word.endTime);
+    expect(zeroLength.length).toBe(6);
   });
 
   it("accepts duration objects with seconds and nanos from synthetic fixture", () => {
@@ -398,7 +449,14 @@ describe("transcription module", () => {
   it("uploads normalized transcript JSON", async () => {
     await uploadTranscriptPayload("video-9", "primary", {
       videoId: "video-9",
-      segments: [{ text: "Hi", startTime: 0, endTime: 1 }],
+      segments: [
+        {
+          text: "Hi",
+          startTime: 0,
+          endTime: 1,
+          words: [{ word: "Hi", startTime: 0, endTime: 1, confidence: 0.9 }],
+        },
+      ],
       durationSeconds: 1,
       language: "en-US",
       model: "long",
