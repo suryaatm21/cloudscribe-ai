@@ -100,7 +100,8 @@ Starting point if `roles/editor` is removed (verify against live bindings before
   buckets), `roles/cloudbuild.builds.editor`, `roles/iam.serviceAccountUser`, and
   `roles/firebase.admin` for `firebase deploy --only functions`.
 - **Function/runtime SA** (per service in the target state): `roles/speech.client`,
-  `roles/datastore.user`, and bucket-scoped `roles/storage.objectAdmin` on
+  `roles/datastore.user`, topic-scoped `roles/pubsub.publisher` on `transcription-jobs`
+  (worker enqueues jobs there), and bucket-scoped `roles/storage.objectAdmin` on
   `atmuri-yt-raw-videos`, `atmuri-yt-processed-videos`, `atmuri-yt-transcripts`, and
   `atmuri-yt-audio-work`. Today the compute SA also carries `roles/run.admin`,
   `roles/iam.serviceAccountTokenCreator`, and the broad Editor grant; narrow those away as
