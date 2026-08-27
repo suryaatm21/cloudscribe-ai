@@ -54,7 +54,7 @@
 
 ✅ **Complete!** Cloud Build CI/CD is now active.
 
-- Two triggers created: `video-processing-service` and `web-client`
+- Three triggers created: `video-processing-service`, `web-client`, and `api-service` (Functions)
 - Both trigger on push to `main` branch
 - Automatic build, push to Artifact Registry, and deploy to Cloud Run
 - Services deployed:
