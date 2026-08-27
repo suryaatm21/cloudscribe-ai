@@ -145,6 +145,14 @@ export const finalizeUpload = onCall({maxInstances: 1}, async (request) => {
   const uploadedAtMillis = parseOwnedVideoId(videoId, uid);
   const cleanTitle = normalizeTitle(title);
 
+  // Owning the id is not the same as having uploaded anything. Without this
+  // check a caller could mint metadata for a video that does not exist, which
+  // would sit at the top of their listing as a permanently "Queued" card
+  // linking to an unplayable watch page. Failing here is also the safe
+  // direction: the client treats a finalize failure as non-fatal, so a real
+  // upload loses only its title, never the video.
+  await assertRawObjectExists(videoId as string);
+
   await firestore
     .collection(videoCollectionId)
     .doc(videoId as string)
@@ -216,6 +224,26 @@ function parseOwnedVideoId(videoId: unknown, uid: string): number {
     );
   }
   return millis;
+}
+
+/**
+ * Confirms a raw upload actually landed for this videoId.
+ *
+ * The uploaded object is `{videoId}.{ext}` and the extension is chosen by the
+ * client, so this matches on the `{videoId}.` prefix rather than a known name.
+ * @param {string} videoId Caller-owned video identifier.
+ */
+async function assertRawObjectExists(videoId: string): Promise<void> {
+  const [files] = await storage.bucket(rawVideoBucketName).getFiles({
+    prefix: `${videoId}.`,
+    maxResults: 1,
+  });
+  if (files.length === 0) {
+    throw new functions.https.HttpsError(
+      "not-found",
+      "No uploaded video found for this id",
+    );
+  }
 }
 
 /**

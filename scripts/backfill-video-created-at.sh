@@ -12,15 +12,20 @@
 # `{uid}-{epochMillis}`, so the id records the true upload time and this
 # migration is deterministic and safely re-runnable.
 #
+# Every HTTP response is status-checked and the whole collection is walked via
+# nextPageToken. A migration whose job is to stop documents from vanishing must
+# not be able to no-op silently: a failed list would otherwise look identical to
+# "nothing to do".
+#
 # Usage: scripts/backfill-video-created-at.sh [--apply]
 #   (default is a dry run that only reports what would change)
 
 set -euo pipefail
 
 PROJECT="${GCP_PROJECT:-yt-clone-385f4}"
-APPLY=0
+MODE="dry-run"
 if [[ "${1:-}" == "--apply" ]]; then
-  APPLY=1
+  MODE="apply"
 fi
 
 if ! command -v gcloud >/dev/null 2>&1; then
@@ -29,65 +34,128 @@ if ! command -v gcloud >/dev/null 2>&1; then
 fi
 
 TOKEN="$(gcloud auth print-access-token)"
-BASE="https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents"
 
-echo "Project: ${PROJECT}"
-if [[ "${APPLY}" -eq 1 ]]; then
-  echo "Mode:    APPLY (documents will be written)"
-else
-  echo "Mode:    dry run (pass --apply to write)"
-fi
-echo
+GCP_PROJECT="${PROJECT}" \
+BACKFILL_MODE="${MODE}" \
+BACKFILL_TOKEN="${TOKEN}" \
+python3 - <<'PYTHON'
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 
-# Collect ids that are missing createdAt, newline separated.
-MISSING="$(
-  curl -sS -H "Authorization: Bearer ${TOKEN}" "${BASE}/videos?pageSize=300" \
-    | python3 -c '
-import sys, json
-payload = json.load(sys.stdin)
-for doc in payload.get("documents", []):
-    fields = doc.get("fields", {})
-    if "createdAt" not in fields:
-        print(doc["name"].split("/")[-1])
-'
-)"
+PROJECT = os.environ["GCP_PROJECT"]
+TOKEN = os.environ["BACKFILL_TOKEN"]
+APPLY = os.environ["BACKFILL_MODE"] == "apply"
 
-if [[ -z "${MISSING}" ]]; then
-  echo "Nothing to do: every video already has createdAt."
-  exit 0
-fi
+BASE = (
+    f"https://firestore.googleapis.com/v1/projects/{PROJECT}"
+    "/databases/(default)/documents"
+)
+# Anything earlier is before the project existed; anything later is a bad id.
+EARLIEST_MILLIS = 1420070400000  # 2015-01-01T00:00:00Z
+TRAILING_TIMESTAMP = re.compile(r"-(\d{10,})$")
 
-while IFS= read -r VIDEO_ID; do
-  [[ -z "${VIDEO_ID}" ]] && continue
+print(f"Project: {PROJECT}")
+print(f"Mode:    {'APPLY (documents will be written)' if APPLY else 'dry run (pass --apply to write)'}")
+print()
 
-  # Trailing run of >=10 digits is the upload timestamp; anything else we skip
-  # rather than guess, so a hand-made id never lands a bogus sort key.
-  MILLIS="$(printf '%s' "${VIDEO_ID}" | sed -n 's/.*-\([0-9]\{10,\}\)$/\1/p')"
-  if [[ -z "${MILLIS}" ]]; then
-    echo "SKIP  ${VIDEO_ID} (no embedded timestamp; set createdAt by hand)"
-    continue
-  fi
 
-  RFC3339="$(python3 -c "
-import datetime, sys
-millis = int(sys.argv[1])
-moment = datetime.datetime.fromtimestamp(millis / 1000, datetime.timezone.utc)
-print(moment.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z')
-" "${MILLIS}")"
+def request(url, method="GET", body=None):
+    """Performs a Firestore REST call, raising on any non-2xx response."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {TOKEN}")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req) as response:
+            payload = response.read().decode()
+            return json.loads(payload) if payload else {}
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode(errors="replace")[:400]
+        raise SystemExit(
+            f"FATAL {method} {url.split('/documents')[-1]} -> HTTP {err.code}\n"
+            f"  {detail}\n"
+            "Aborting: a partial backfill would leave videos invisible on the "
+            "home page."
+        ) from err
 
-  if [[ "${APPLY}" -eq 0 ]]; then
-    echo "WOULD SET ${VIDEO_ID} -> ${RFC3339}"
-    continue
-  fi
 
-  # updateMask limits the write to createdAt so no other field is touched.
-  HTTP_CODE="$(
-    curl -sS -o /dev/null -w '%{http_code}' \
-      -X PATCH \
-      -H "Authorization: Bearer ${TOKEN}" \
-      -H "Content-Type: application/json" \
-      "${BASE}/videos/${VIDEO_ID}?updateMask.fieldPaths=createdAt" \
-      -d "{\"fields\":{\"createdAt\":{\"timestampValue\":\"${RFC3339}\"}}}"
-  )"
-  echo "SET   ${VIDEO_ID} -> ${RFC3339} (HTTP ${HTTP_CODE})"
-done <<< "${MISSING}"
+def iter_video_documents():
+    """Walks the whole videos collection, following nextPageToken."""
+    page_token = None
+    while True:
+        query = {"pageSize": "300"}
+        if page_token:
+            query["pageToken"] = page_token
+        payload = request(f"{BASE}/videos?{urllib.parse.urlencode(query)}")
+        for doc in payload.get("documents", []):
+            yield doc
+        page_token = payload.get("nextPageToken")
+        if not page_token:
+            return
+
+
+missing = []
+total = 0
+for doc in iter_video_documents():
+    total += 1
+    if "createdAt" not in doc.get("fields", {}):
+        missing.append(doc["name"].split("/")[-1])
+
+print(f"Scanned {total} video document(s); {len(missing)} missing createdAt.")
+print()
+
+if not missing:
+    print("Nothing to do: every video already has createdAt.")
+    sys.exit(0)
+
+skipped = 0
+written = 0
+for video_id in missing:
+    match = TRAILING_TIMESTAMP.search(video_id)
+    if not match:
+        print(f"SKIP  {video_id} (no embedded timestamp; set createdAt by hand)")
+        skipped += 1
+        continue
+
+    millis = int(match.group(1))
+    if millis < EARLIEST_MILLIS:
+        print(f"SKIP  {video_id} (timestamp {millis} predates the project)")
+        skipped += 1
+        continue
+
+    moment = datetime.fromtimestamp(millis / 1000, timezone.utc)
+    rfc3339 = moment.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    if not APPLY:
+        print(f"WOULD SET {video_id} -> {rfc3339}")
+        continue
+
+    # updateMask limits the write to createdAt so no other field is touched.
+    request(
+        f"{BASE}/videos/{urllib.parse.quote(video_id)}"
+        "?updateMask.fieldPaths=createdAt",
+        method="PATCH",
+        body={"fields": {"createdAt": {"timestampValue": rfc3339}}},
+    )
+    print(f"SET   {video_id} -> {rfc3339}")
+    written += 1
+
+print()
+if APPLY:
+    print(f"Wrote {written} document(s); skipped {skipped}.")
+    if skipped:
+        print(
+            "WARNING: skipped documents still have no createdAt and remain "
+            "hidden from the home page."
+        )
+        sys.exit(1)
+else:
+    print(f"Dry run complete; {len(missing) - skipped} document(s) would change.")
+PYTHON
