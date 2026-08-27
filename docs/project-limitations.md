@@ -55,10 +55,12 @@
 ✅ **Complete!** Cloud Build CI/CD is now active.
 
 - Three triggers created: `video-processing-service`, `web-client`, and `api-service` (Functions)
-- Both trigger on push to `main` branch
-- Automatic build, push to Artifact Registry, and deploy to Cloud Run
+- All three trigger on push to `main` branch (`api-service` only when `api-service/**` changes)
+- Cloud Run services: automatic Docker build → Artifact Registry → `gcloud run deploy`
+- Functions: `firebase deploy --only functions` (predeploy lint + build; rules/indexes excluded)
 - Services deployed:
   - `video-processing-service` → Cloud Run service `video-processing-service`
   - `web-client` → Cloud Run service `cloudscribe-ai`
+  - `api-service` → Firebase Cloud Functions (gen2)
 - Monitor builds: https://console.cloud.google.com/cloud-build/builds?project=yt-clone-385f4 
 
