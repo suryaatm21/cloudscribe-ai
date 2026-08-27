@@ -1,55 +1,81 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { uploadVideo } from "../firebase/functions";
 
 import styles from "./upload.module.css";
 
+const MAX_TITLE_LENGTH = 200;
+
+/** Suggests a title from the filename so the field is never blank on open. */
+function titleFromFileName(fileName: string): string {
+  const withoutExtension = fileName.replace(/\.[^.]+$/, "");
+  return withoutExtension.replace(/[_-]+/g, " ").trim().slice(0, MAX_TITLE_LENGTH);
+}
+
 export default function Upload() {
-  // If the user selects a file, we will call the handleFileChange function
-  const handleFileChange = async (
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) => {
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [title, setTitle] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (pendingFile) {
+      titleRef.current?.focus();
+      titleRef.current?.select();
+    }
+  }, [pendingFile]);
+
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.item(0);
     if (file) {
-      handleUpload(file);
+      setPendingFile(file);
+      setTitle(titleFromFileName(file.name));
+      setError(null);
+    }
+    // Reset so picking the same file again still fires onChange.
+    if (inputRef.current) {
+      inputRef.current.value = "";
     }
   };
 
-  // Handle the file upload with the uploadVideo function we created in firebase/functions.ts and error handling
-  const handleUpload = async (file: File) => {
+  const closeDialog = () => {
+    setPendingFile(null);
+    setTitle("");
+    setError(null);
+  };
+
+  const handleUpload = async () => {
+    if (!pendingFile) {
+      return;
+    }
+    setUploading(true);
+    setError(null);
     try {
-      // Show loading alert
-      console.log(`📤 Uploading ${file.name}...`);
-
-      const response = await uploadVideo(file);
-
-      // Show success alert with details
-      alert(
-        `✅ ${response.message}\n\n` +
-          `📁 File: ${response.fileName}\n` +
-          `⏳ Your video is being processed. Check back in a few minutes!`,
-      );
-    } catch (error) {
-      // Show detailed error
-      console.error("Upload error:", error);
-      alert(
-        `❌ Failed to upload file: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      await uploadVideo(pendingFile, title);
+      closeDialog();
+      // The home page reads through a callable, so it needs a nudge to refetch.
+      window.dispatchEvent(new Event("cloudscribe:video-uploaded"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploading(false);
     }
   };
 
   return (
-    // Use a Fragment to wrap the input and label because Typescript only allows one child element to be returned
     <Fragment>
       <input
         id="upload"
+        ref={inputRef}
         className={styles.uploadInput}
         type="file"
         accept="video/*"
         onChange={handleFileChange}
       />
-      <label htmlFor="upload" className={styles.uploadButton}>
+      <label htmlFor="upload" className={styles.uploadButton} title="Upload a lecture">
         <svg
           xmlns="http://www.w3.org/2000/svg"
           fill="none"
@@ -65,6 +91,70 @@ export default function Upload() {
           />
         </svg>
       </label>
+
+      {pendingFile && (
+        <div
+          className={styles.overlay}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="upload-dialog-heading"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !uploading) {
+              closeDialog();
+            }
+          }}
+        >
+          <div className={styles.dialog}>
+            <h2 id="upload-dialog-heading" className={styles.dialogHeading}>
+              Name this lecture
+            </h2>
+            <p className={styles.fileName}>{pendingFile.name}</p>
+
+            <label htmlFor="video-title" className={styles.fieldLabel}>
+              Title
+            </label>
+            <input
+              id="video-title"
+              ref={titleRef}
+              className={styles.titleInput}
+              type="text"
+              value={title}
+              maxLength={MAX_TITLE_LENGTH}
+              disabled={uploading}
+              placeholder="e.g. Linear Algebra, Week 3"
+              onChange={(event) => setTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  handleUpload();
+                } else if (event.key === "Escape" && !uploading) {
+                  closeDialog();
+                }
+              }}
+            />
+
+            {error && <p className={styles.error}>{error}</p>}
+
+            <div className={styles.actions}>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={closeDialog}
+                disabled={uploading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={styles.primaryButton}
+                onClick={handleUpload}
+                disabled={uploading}
+              >
+                {uploading ? "Uploading…" : "Upload"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Fragment>
   );
 }

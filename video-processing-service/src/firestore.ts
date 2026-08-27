@@ -30,6 +30,12 @@ export interface Video {
   status?: "processing" | "processed" | "failed"; // solves the bug with Pub/Sub redelivery if Cloud Run instance is still processing the video, we want idempotency and to avoid duplicates
   title?: string;
   description?: string;
+  /**
+   * Upload time, and the home page sort key. Normally written by the
+   * `finalizeUpload` callable; see `setVideoEnsuringCreatedAt` for why the
+   * worker backfills it.
+   */
+  createdAt?: Timestamp;
 }
 
 /**
@@ -189,6 +195,58 @@ export function setVideo(videoId: string, video: Video) {
     .collection(videoCollectionId)
     .doc(videoId)
     .set(video, { merge: true }); // merge: true allows us to update only specific fields without overwriting the entire document
+}
+
+/**
+ * Same as `setVideo`, but guarantees the document ends up with a `createdAt`.
+ *
+ * The home page orders by `createdAt`, and Firestore omits documents that are
+ * missing the ordered field entirely — so a video without it is invisible, not
+ * just misplaced. `finalizeUpload` normally sets it, but that call can be lost
+ * (tab closed between the upload finishing and the callable returning), and the
+ * worker is the last writer that can still repair it.
+ *
+ * Transactional read-then-write because a plain merge would clobber the real
+ * upload time with whenever transcoding happened to finish.
+ */
+export async function setVideoEnsuringCreatedAt(
+  videoId: string,
+  video: Video,
+): Promise<void> {
+  const ref = firestore.collection(videoCollectionId).doc(videoId);
+  await firestore.runTransaction(async (tx) => {
+    const snapshot = await tx.get(ref);
+    const existing = snapshot.exists ? (snapshot.data() as Video) : undefined;
+    const payload: Video = { ...video };
+    if (!existing?.createdAt) {
+      payload.createdAt = createdAtFromVideoId(videoId) ?? Timestamp.now();
+    }
+    tx.set(ref, payload, { merge: true });
+  });
+}
+
+/**
+ * Upload ids are `{uid}-{epochMillis}`, so a lost `finalizeUpload` can still be
+ * repaired with the true upload time instead of the transcode time. Rejects
+ * implausible values so a hand-made id cannot place a video far in the future
+ * and pin it to the top of the list forever.
+ */
+export function createdAtFromVideoId(videoId: string): Timestamp | undefined {
+  const match = videoId.match(/-(\d{10,})$/);
+  if (!match) {
+    return undefined;
+  }
+  const millis = Number(match[1]);
+  if (!Number.isSafeInteger(millis) || millis <= 0) {
+    return undefined;
+  }
+  // Reject anything before 2015 or more than a day ahead of now.
+  const earliest = Date.UTC(2015, 0, 1);
+  const latest = Date.now() + 24 * 60 * 60 * 1000;
+  if (millis < earliest || millis > latest) {
+    return undefined;
+  }
+  return Timestamp.fromMillis(millis);
 }
 
 /**

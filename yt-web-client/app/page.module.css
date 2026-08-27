@@ -46,3 +46,35 @@
   color: #666;
   margin: 0.25rem 0 0 0;
 }
+
+.loadMoreRow {
+  display: flex;
+  justify-content: center;
+  margin-top: 2rem;
+}
+
+.loadMoreButton {
+  padding: 0.6rem 1.6rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #444;
+  background: #fff;
+  border: 1px solid #d4d4d4;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.loadMoreButton:hover:not(:disabled) {
+  background: #f4f4f4;
+}
+
+.loadMoreButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.error {
+  color: #b3261e;
+  font-size: 0.9rem;
+}

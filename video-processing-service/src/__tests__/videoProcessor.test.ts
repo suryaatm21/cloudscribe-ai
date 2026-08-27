@@ -1,5 +1,9 @@
 import { processVideo, uidFromVideoId, videoIdFromFileNames } from "../videoProcessor";
-import { createTranscript, setVideo, updateTranscriptStatus } from "../firestore";
+import {
+  createTranscript,
+  setVideoEnsuringCreatedAt,
+  updateTranscriptStatus,
+} from "../firestore";
 import {
   downloadRawVideo,
   convertVideo,
@@ -16,6 +20,7 @@ import { serviceConfig } from "../config";
 
 jest.mock("../firestore", () => ({
   setVideo: jest.fn(),
+  setVideoEnsuringCreatedAt: jest.fn(),
   createTranscript: jest.fn(),
   updateTranscriptStatus: jest.fn(),
 }));
@@ -77,7 +82,7 @@ describe("processVideo", () => {
       processVideo("input.mp4", "processed-input.mp4", videoId, userId),
     ).resolves.toBeUndefined();
 
-    expect(setVideo).toHaveBeenCalledWith(videoId, {
+    expect(setVideoEnsuringCreatedAt).toHaveBeenCalledWith(videoId, {
       status: "processed",
       filename: "processed-input.mp4",
       uid: userId,
@@ -197,7 +202,7 @@ describe("processVideo", () => {
       processVideo("input.mp4", "processed-input.mp4", videoId, userId),
     ).rejects.toThrow("transient failure");
 
-    expect(setVideo).toHaveBeenLastCalledWith(videoId, {
+    expect(setVideoEnsuringCreatedAt).toHaveBeenLastCalledWith(videoId, {
       status: "failed",
       uid: userId,
     });
