@@ -81,6 +81,31 @@ succeed.
 uses that key for a server-side call, and Node sends no `Referer` header. Adding referrer
 restrictions first returns 403 and presents as an auth bug rather than a key restriction.
 
+**Least-privilege IAM is deferred, not forgotten.** `262816123746-compute@developer.gserviceaccount.com`
+holds project-wide `roles/editor` and is currently the runtime identity for every Cloud Run
+service, every Cloud Function, and the Cloud Build service account for the Functions deploy
+trigger (`api-service/cloudbuild.yaml`). That breadth has repeatedly masked missing narrow
+grants: the Speech service agent's missing `storage.objects.create` on the transcripts bucket
+took a live run to surface, and the Functions identity's transcripts-bucket access looked fine
+only because Editor covered it. The Functions CI deploy added in PR #21 now depends on that
+grant. **Target state:** a dedicated build service account with explicit deploy roles, and
+separate runtime identities per service. **Why not now:** too much currently depends on the
+broad grant; changing it risks breaking working deploys. Sequence this after the current
+security items (signed video URLs, API-key restrictions, uniform access on legacy buckets).
+
+Starting point if `roles/editor` is removed (verify against live bindings before applying):
+
+- **Functions deploy SA** (currently the compute SA): `roles/cloudfunctions.admin`,
+  `roles/artifactregistry.writer`, `roles/storage.objectAdmin` (GCF source and artifact
+  buckets), `roles/cloudbuild.builds.editor`, `roles/iam.serviceAccountUser`, and
+  `roles/firebase.admin` for `firebase deploy --only functions`.
+- **Function/runtime SA** (per service in the target state): `roles/speech.client`,
+  `roles/datastore.user`, and bucket-scoped `roles/storage.objectAdmin` on
+  `atmuri-yt-raw-videos`, `atmuri-yt-processed-videos`, `atmuri-yt-transcripts`, and
+  `atmuri-yt-audio-work`. Today the compute SA also carries `roles/run.admin`,
+  `roles/iam.serviceAccountTokenCreator`, and the broad Editor grant; narrow those away as
+  identities split.
+
 ## Couplings that are easy to break
 
 **Videos transcode at original resolution on purpose.** The 360p downscale was removed,
