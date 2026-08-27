@@ -1,0 +1,141 @@
+{
+  "videoId": "zUBGbRycgiOhdHgFZtbDycYw1SH3-1787788487732",
+  "language": "en-US",
+  "model": "long",
+  "durationSeconds": 153.97,
+  "segments": [
+    {
+      "text": "This is a LibriVox recording. All LibriVox recordings are in the public domain for more information or to volunteer, please visit librivox.org.",
+      "startTime": 2.1,
+      "endTime": 11,
+      "confidence": 0.90959585
+    },
+    {
+      "text": "This recording is by Mark Smith of Simpsonville, South Carolina.",
+      "startTime": 13.9,
+      "endTime": 17.2,
+      "confidence": 0.93549234
+    },
+    {
+      "text": "the address at the dedication of the National Cemetery at Gettysburg, November 19 1863",
+      "startTime": 20.2,
+      "endTime": 26.8,
+      "confidence": 0.9360611
+    },
+    {
+      "text": "also known as the Gettysburg Address",
+      "startTime": 27.7,
+      "endTime": 30.3,
+      "confidence": 0.97412914
+    },
+    {
+      "text": "by Abraham Lincoln",
+      "startTime": 31.2,
+      "endTime": 32.2,
+      "confidence": 0.9686406
+    },
+    {
+      "text": "Four score and seven years ago our fathers brought forth upon this continent a new nation conceived in liberty and dedicated to the proposition that all men are created equal.",
+      "startTime": 36,
+      "endTime": 48.5,
+      "confidence": 0.9484636
+    },
+    {
+      "text": "Now we are engaged in a great civil war.",
+      "startTime": 50,
+      "endTime": 52.5,
+      "confidence": 0.99210197
+    },
+    {
+      "text": "Testing whether that Nation or any Nation so conceived and so dedicated can long endure.",
+      "startTime": 53.4,
+      "endTime": 60,
+      "confidence": 0.9772046
+    },
+    {
+      "text": "We are met on a great battlefield of that war.",
+      "startTime": 61.4,
+      "endTime": 63.6,
+      "confidence": 0.9871308
+    },
+    {
+      "text": "We have come to dedicate a portion of that field as a final resting place for those who here gave their lives that their Nation might live.",
+      "startTime": 64.8,
+      "endTime": 74.2,
+      "confidence": 0.97503954
+    },
+    {
+      "text": "It is altogether fitting and proper that we should do this.",
+      "startTime": 75.4,
+      "endTime": 78.7,
+      "confidence": 0.98960346
+    },
+    {
+      "text": "But in a larger sense, we cannot dedicate we cannot consecrate we cannot hallow this ground.",
+      "startTime": 80.9,
+      "endTime": 87.7,
+      "confidence": 0.9738257
+    },
+    {
+      "text": "the brave men living in dead who struggled here",
+      "startTime": 88.7,
+      "endTime": 91.8,
+      "confidence": 0.9397832
+    },
+    {
+      "text": "have consecrated it far above our power to add or detract.",
+      "startTime": 92.5,
+      "endTime": 96.3,
+      "confidence": 0.95109266
+    },
+    {
+      "text": "The world will little note nor long. Remember what we say here.",
+      "startTime": 97.53,
+      "endTime": 100.93,
+      "confidence": 0.9217556
+    },
+    {
+      "text": "But it can never forget what they did here.",
+      "startTime": 101.83,
+      "endTime": 104.63,
+      "confidence": 0.993767
+    },
+    {
+      "text": "It is for us the living rather to be dedicated here to The Unfinished work which they who fought here have thus far so nobly advanced.",
+      "startTime": 105.73,
+      "endTime": 114.73,
+      "confidence": 0.992515
+    },
+    {
+      "text": "It is rather for us to be here dedicated to the great task remaining before us.",
+      "startTime": 116.13,
+      "endTime": 121.03,
+      "confidence": 0.99071646
+    },
+    {
+      "text": "That from these honored dead. We take increased Devotion to that cause for which they gave the last full measure of devotion.",
+      "startTime": 122.13,
+      "endTime": 129.93,
+      "confidence": 0.96606976
+    },
+    {
+      "text": "That we here highly resolve that these dead shall not have died in vain that this nation under God shall have a new birth of freedom.",
+      "startTime": 131.17,
+      "endTime": 141.17,
+      "confidence": 0.9613464
+    },
+    {
+      "text": "And that government of the People by the people and for the people shall not perish from the Earth.",
+      "startTime": 141.97,
+      "endTime": 149.47,
+      "confidence": 0.99596775
+    },
+    {
+      "text": "and of the Gettysburg Address",
+      "startTime": 152.77,
+      "endTime": 153.97,
+      "confidence": 0.873946
+    }
+  ],
+  "createdAt": "2026-08-26T23:56:01.527Z"
+}

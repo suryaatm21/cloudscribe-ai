@@ -25,11 +25,20 @@ import { logger } from "./logger";
  * https://cloud.google.com/speech-to-text/docs/reference/rest/v2/BatchRecognizeFileResult
  */
 
+export interface ITranscriptWord {
+  word: string;
+  startTime: number;
+  endTime: number;
+  confidence?: number;
+}
+
 export interface ITranscriptSegment {
   text: string;
   startTime: number;
   endTime: number;
   confidence?: number;
+  /** Per-word timings and confidence from Speech v2 when present. */
+  words?: ITranscriptWord[];
 }
 
 export interface ITranscriptPayload {
@@ -441,13 +450,13 @@ export function buildTranscriptPayload(
       return;
     }
 
-    const words = asArray(readField(alternative, "words"));
+    const rawWords = asArray(readField(alternative, "words"));
     const startTime =
-      durationToSeconds(readField(words[0], "startOffset", "start_offset")) ??
+      durationToSeconds(readField(rawWords[0], "startOffset", "start_offset")) ??
       durationToSeconds(readField(result, "resultEndOffset", "result_end_offset"));
     const endTime =
       durationToSeconds(
-        readField(words[words.length - 1], "endOffset", "end_offset"),
+        readField(rawWords[rawWords.length - 1], "endOffset", "end_offset"),
       ) ??
       durationToSeconds(readField(result, "resultEndOffset", "result_end_offset"));
     if (startTime === undefined || endTime === undefined) {
@@ -458,11 +467,13 @@ export function buildTranscriptPayload(
     maxEnd = Math.max(maxEnd, endTime);
 
     const confidence = numberField(alternative, "confidence");
+    const mappedWords = mapSpeechWords(rawWords, index);
     segments.push({
       text,
       startTime,
       endTime,
       confidence: confidence ?? undefined,
+      words: mappedWords.length > 0 ? mappedWords : undefined,
     });
   });
 
@@ -712,6 +723,48 @@ function numberField(
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+/**
+ * Maps Speech v2 per-word entries into normalized word objects.
+ *
+ * Zero-length offsets (identical start and end) are preserved as-is — observed
+ * on real output (e.g. "is" at 2.500s). Speech emits these for some tokens;
+ * consumers should treat them as instantaneous markers, not malformed data.
+ */
+function mapSpeechWords(words: unknown[], resultIndex: number): ITranscriptWord[] {
+  return words.map((entry, wordIndex) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throwPermanentParse(
+        `Unexpected Speech v2 result JSON: results[${resultIndex}].alternatives[0].words[${wordIndex}] is not an object`,
+      );
+    }
+    const record = entry as Record<string, unknown>;
+    const word = readField(record, "word");
+    if (typeof word !== "string" || word.length === 0) {
+      throwPermanentParse(
+        `Unexpected Speech v2 result JSON: results[${resultIndex}].alternatives[0].words[${wordIndex}].word is not a non-empty string`,
+      );
+    }
+    const startTime = durationToSeconds(
+      readField(record, "startOffset", "start_offset"),
+    );
+    const endTime = durationToSeconds(
+      readField(record, "endOffset", "end_offset"),
+    );
+    if (startTime === undefined || endTime === undefined) {
+      throwPermanentParse(
+        `Unexpected Speech v2 result JSON: results[${resultIndex}].alternatives[0].words[${wordIndex}] is missing timing`,
+      );
+    }
+    const wordConfidence = numberField(record, "confidence");
+    return {
+      word,
+      startTime,
+      endTime,
+      confidence: wordConfidence ?? undefined,
+    };
+  });
 }
 
 function describeType(value: unknown): string {
