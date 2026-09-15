@@ -1,0 +1,4 @@
+.env
+yt-web-client/.env.local
+video-processing-service/.env
+api-service/functions/.env

@@ -1,0 +1,12 @@
+{
+  "enabledPlugins": { "superpowers@claude-plugins-official": false },
+  "env": { "ENABLE_CODE_SECURITY_REVIEW": "0" },
+  "permissions": {
+    "deny": [
+      "Bash(firebase *)", "Bash(npx firebase *)", "Bash(npx firebase-tools *)",
+      "Bash(gcloud *)", "Bash(gsutil *)", "Bash(npm *deploy*)",
+      "Bash(gh pr merge *)", "Bash(gh api *)", "Bash(gh repo edit *)", "Bash(gh auth *)",
+      "Read(~/.config/gcloud/**)", "Read(~/.config/configstore/**)"
+    ]
+  }
+}
