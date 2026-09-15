@@ -5,6 +5,7 @@
     "deny": [
       "Bash(firebase *)", "Bash(npx firebase *)", "Bash(npx firebase-tools *)",
       "Bash(gcloud *)", "Bash(gsutil *)", "Bash(npm *deploy*)",
+      "Bash(*deploy.sh*)", "Bash(*setup-transcription-infra.sh*)", "Bash(docker push *)",
       "Bash(gh pr merge *)", "Bash(gh api *)", "Bash(gh repo edit *)", "Bash(gh auth *)",
       "Read(~/.config/gcloud/**)", "Read(~/.config/configstore/**)"
     ]
