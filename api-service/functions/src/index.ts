@@ -15,6 +15,10 @@ import * as logger from "firebase-functions/logger";
 import {Storage} from "@google-cloud/storage";
 import {onCall, onRequest} from "firebase-functions/v2/https";
 import cors from "cors";
+import {
+  normalizeVideoExtension,
+  UNSUPPORTED_EXTENSION_MESSAGE,
+} from "./uploads";
 
 initializeApp();
 
@@ -100,11 +104,17 @@ export const generateUploadUrl = onCall(
       );
     }
     const auth = request.auth;
-    const data = request.data;
+    const fileExtension = normalizeVideoExtension(request.data?.fileExtension);
+    if (!fileExtension) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        UNSUPPORTED_EXTENSION_MESSAGE,
+      );
+    }
     const bucket = storage.bucket(rawVideoBucketName);
 
     const videoId = `${auth.uid}-${Date.now()}`;
-    const fileName = `${videoId}.${data.fileExtension}`;
+    const fileName = `${videoId}.${fileExtension}`;
     const [url] = await bucket.file(fileName).getSignedUrl({
       version: "v4",
       action: "write",
@@ -294,10 +304,13 @@ export const getUploadUrl = onRequest(
           return;
         }
 
-        const fileExtension =
-          (request.query.extension as string) ||
-          request.body?.fileExtension ||
-          "mp4";
+        const fileExtension = normalizeVideoExtension(
+          request.query.extension || request.body?.fileExtension || "mp4",
+        );
+        if (!fileExtension) {
+          response.status(400).send({error: UNSUPPORTED_EXTENSION_MESSAGE});
+          return;
+        }
 
         const videoId = `${decodedToken.uid}-${Date.now()}`;
         const fileName = `${videoId}.${fileExtension}`;
