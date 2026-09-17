@@ -12,7 +12,6 @@ import {
 import { Timestamp } from "firebase-admin/firestore";
 import {
   createTranscript,
-  setVideo,
   setVideoEnsuringCreatedAt,
   updateTranscriptStatus,
 } from "./firestore";

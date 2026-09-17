@@ -9,7 +9,7 @@ import {
   getTranscript,
   isVideoNew,
   listTranscriptsForReconcile,
-  setVideo,
+  setVideoEnsuringCreatedAt,
   timestampToMillis,
   updateTranscript,
   updateTranscriptStatus,
@@ -159,7 +159,7 @@ app.post(
       return;
     }
 
-    await setVideo(videoId, {
+    await setVideoEnsuringCreatedAt(videoId, {
       id: videoId,
       uid: userId,
       status: "processing",

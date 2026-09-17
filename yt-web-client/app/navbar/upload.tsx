@@ -7,6 +7,31 @@ import styles from "./upload.module.css";
 
 const MAX_TITLE_LENGTH = 200;
 
+/**
+ * Mirrors ALLOWED_VIDEO_EXTENSIONS in api-service/functions/src/uploads.ts,
+ * which is the enforcing copy. Duplicated because the client and Functions
+ * share no package; keep the two lists in step.
+ */
+const ALLOWED_VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "mkv"] as const;
+
+const ACCEPTED_FILE_TYPES = ALLOWED_VIDEO_EXTENSIONS.map((ext) => `.${ext}`).join(",");
+
+const UNSUPPORTED_EXTENSION_MESSAGE =
+  `Unsupported video type. Use one of: ${ALLOWED_VIDEO_EXTENSIONS.join(", ")}.`;
+
+/**
+ * Rejects a file the upload endpoint would refuse anyway. Derives the extension
+ * exactly as uploadVideo does, so a name with no extension sends the whole
+ * filename and is caught here rather than after the user names the lecture.
+ */
+function isSupportedVideo(fileName: string): boolean {
+  const extension = fileName.split(".").pop()?.toLowerCase();
+  return (
+    extension !== undefined &&
+    (ALLOWED_VIDEO_EXTENSIONS as readonly string[]).includes(extension)
+  );
+}
+
 /** Suggests a title from the filename so the field is never blank on open. */
 function titleFromFileName(fileName: string): string {
   const withoutExtension = fileName.replace(/\.[^.]+$/, "");
@@ -18,6 +43,7 @@ export default function Upload() {
   const [title, setTitle] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rejection, setRejection] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
 
@@ -30,10 +56,14 @@ export default function Upload() {
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.item(0);
-    if (file) {
+    if (file && !isSupportedVideo(file.name)) {
+      setPendingFile(null);
+      setRejection(`${file.name} — ${UNSUPPORTED_EXTENSION_MESSAGE}`);
+    } else if (file) {
       setPendingFile(file);
       setTitle(titleFromFileName(file.name));
       setError(null);
+      setRejection(null);
     }
     // Reset so picking the same file again still fires onChange.
     if (inputRef.current) {
@@ -72,7 +102,7 @@ export default function Upload() {
         ref={inputRef}
         className={styles.uploadInput}
         type="file"
-        accept="video/*"
+        accept={ACCEPTED_FILE_TYPES}
         onChange={handleFileChange}
       />
       <label htmlFor="upload" className={styles.uploadButton} title="Upload a lecture">
@@ -150,6 +180,35 @@ export default function Upload() {
                 disabled={uploading}
               >
                 {uploading ? "Uploading…" : "Upload"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {rejection && (
+        <div
+          className={styles.overlay}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="upload-rejection-heading"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setRejection(null);
+            }
+          }}
+        >
+          <div className={styles.dialog}>
+            <h2 id="upload-rejection-heading" className={styles.dialogHeading}>
+              Unsupported file
+            </h2>
+            <p className={styles.error}>{rejection}</p>
+            <div className={styles.actions}>
+              <button
+                type="button"
+                className={styles.primaryButton}
+                onClick={() => setRejection(null)}
+              >
+                Close
               </button>
             </div>
           </div>
