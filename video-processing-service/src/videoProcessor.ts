@@ -12,7 +12,7 @@ import {
 import { Timestamp } from "firebase-admin/firestore";
 import {
   createTranscript,
-  setVideo,
+  setVideoEnsuringCreatedAt,
   updateTranscriptStatus,
 } from "./firestore";
 import { serviceConfig } from "./config";
@@ -56,7 +56,7 @@ export async function processVideo(
       await convertVideo(inputFileName, outputFileName);
       await uploadProcessedVideo(outputFileName);
 
-      await setVideo(videoId, {
+      await setVideoEnsuringCreatedAt(videoId, {
         status: "processed",
         filename: outputFileName,
         uid: userId,
@@ -98,7 +98,9 @@ export async function processVideo(
     }
   }
 
-  await setVideo(videoId, { status: "failed", uid: userId });
+  // Also ensures createdAt: a failed video the owner cannot see is worse than
+  // a failed video they can.
+  await setVideoEnsuringCreatedAt(videoId, { status: "failed", uid: userId });
   const errorToThrow =
     lastError instanceof Error
       ? lastError

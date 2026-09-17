@@ -1,4 +1,5 @@
 import {
+  createdAtFromVideoId,
   evaluateTranscriptClaim,
   claimTranscriptJob,
   buildTranscriptStatusUpdate,
@@ -30,7 +31,13 @@ jest.mock("firebase-admin/firestore", () => {
         return fn({});
       }
     },
-    Timestamp: { now: () => ({ seconds: 1, nanoseconds: 0 }) },
+    Timestamp: {
+      now: () => ({ seconds: 1, nanoseconds: 0 }),
+      fromMillis: (millis: number) => ({
+        seconds: Math.floor(millis / 1000),
+        nanoseconds: (millis % 1000) * 1e6,
+      }),
+    },
     FieldValue: { delete: () => deleteSentinel },
   };
 });
@@ -43,6 +50,35 @@ jest.mock("../logger", () => ({
     debug: jest.fn(),
   },
 }));
+
+describe("createdAtFromVideoId", () => {
+  it("recovers the upload time embedded in the video id", () => {
+    // 1762755371008 ms -> 2025-11-10T05:36:11.008Z
+    expect(createdAtFromVideoId("user123-1762755371008")).toEqual({
+      seconds: 1762755371,
+      nanoseconds: 8_000_000,
+    });
+  });
+
+  it("keeps hyphenated uids intact", () => {
+    expect(createdAtFromVideoId("my-hyphen-uid-1762755371008")).toEqual({
+      seconds: 1762755371,
+      nanoseconds: 8_000_000,
+    });
+  });
+
+  it("returns undefined when there is no trailing timestamp", () => {
+    expect(createdAtFromVideoId("plain")).toBeUndefined();
+    expect(createdAtFromVideoId("user123-42")).toBeUndefined();
+  });
+
+  it("rejects timestamps that would pin a video to the top of the list", () => {
+    const farFuture = Date.now() + 90 * 24 * 60 * 60 * 1000;
+    expect(createdAtFromVideoId(`user123-${farFuture}`)).toBeUndefined();
+    // 2001, before the project existed.
+    expect(createdAtFromVideoId("user123-1000000000000")).toBeUndefined();
+  });
+});
 
 describe("evaluateTranscriptClaim", () => {
   const pending: TranscriptDocument = {

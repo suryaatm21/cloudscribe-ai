@@ -62,7 +62,7 @@ This document captures all required environment variables, service accounts, and
 
 **Service Accounts**
 
-- Firebase admin SDK default service account requires `roles/storage.objectCreator` on the raw bucket to issue signed URLs.
+- Firebase admin SDK default service account requires `roles/storage.objectCreator` on the raw bucket to issue signed URLs, plus `roles/storage.objectViewer` on the same bucket: `finalizeUpload` confirms the upload landed by listing the `{videoId}.` prefix, and `objectCreator` grants neither list nor get. Both are covered today only by the project-wide `roles/editor` on the compute service account (see `AGENTS.md`), so a missing `objectViewer` grant surfaces as silent title loss once that breadth is narrowed.
 
 **Transcripts bucket CORS**
 

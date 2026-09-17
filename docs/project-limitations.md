@@ -48,7 +48,34 @@
 - **Tradeoff:** Filenames can be long and unwieldy; exposes internal structure.
 - **Potential Solution:**
   - Use a short, unique `videoId` (e.g., UUID or Firestore doc ID) and map it to the filename in Firestore. This requires more work but is more robust.
-- When we are processing a video, we don't handle that in our web client and still show a thumbnail. 
+- When we are processing a video, we don't handle that in our web client and still show a thumbnail.
+
+## Home Page Listing
+
+- **`createdAt` is load-bearing, not decorative.** The home page orders by it, and
+  Firestore omits documents that are missing the ordered field entirely, so a video
+  without `createdAt` is *invisible* rather than merely unsorted. Two writers keep this
+  invariant: the `finalizeUpload` callable sets it at upload time, and
+  `setVideoEnsuringCreatedAt` in the worker backfills it if that call was lost. Both
+  derive the value from the `{uid}-{epochMillis}` video id, so they agree regardless of
+  which one writes first. `scripts/backfill-video-created-at.sh` repaired the documents
+  that predated this.
+- **Query requires a composite index:** `videos(uid ASC, createdAt DESC)`, declared in
+  `api-service/firestore.indexes.json`. Deploy the index before the query, or every
+  home page load fails with `FAILED_PRECONDITION`.
+- **Pagination is opt-in on the wire.** `getVideos` returns the legacy bare array unless
+  the caller passes `paged: true`. Functions and the web client deploy on separate Cloud
+  Build triggers, so this keeps an already-deployed browser bundle working during the
+  minutes between the two deploys. The legacy branch can be deleted once no old bundle
+  is live.
+- **Titles are captured after the bytes land**, not when the signed URL is issued.
+  Writing metadata at signed-URL time would leave a phantom document behind every
+  abandoned upload. Consequence: if the tab closes between the upload completing and
+  `finalizeUpload` returning, the video still processes but keeps its filename-derived
+  display name.
+- **`finalizeUpload` must not write `status`.** The worker's idempotency guard
+  (`isVideoNew`) treats a missing status as "not yet processed"; setting a status at
+  upload time would make the worker skip transcoding for every upload.
 
 ## Continuous Deployment 
 
