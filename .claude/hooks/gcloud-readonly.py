@@ -49,10 +49,10 @@ def check_segment(seg):
         if t.startswith("-"):
             break
         pos.append(t)
-    path = tuple(pos)
-    if path in ALLOWED_PATHS:
-        return True
-    if len(path) > 1 and path[:-1] in ALLOWED_PATHS and path[-2] != "list":
+    # Every allowed path ends in a leaf read command, so any words after it are
+    # resource arguments (a service name, a repository path) and cannot select a
+    # different command.
+    if any(tuple(pos[:end]) in ALLOWED_PATHS for end in range(1, len(pos) + 1)):
         return True
     deny("command path is not on the read-only allowlist")
 
@@ -64,6 +64,9 @@ def main():
         deny("could not read hook input")
     if not isinstance(command, str):
         deny("could not read hook input")
+    # Join backslash-newline continuations as bash does, but only when the
+    # backslash is not itself escaped: "\\" followed by a newline still ends the command.
+    command = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", command)
     probe = command.replace("\\", "").replace("'", "").replace('"', "").lower()
     if "gcloud" not in command.lower() and "gcloud" not in probe:
         return
