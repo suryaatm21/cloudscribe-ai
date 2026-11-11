@@ -1,13 +1,39 @@
 {
-  "enabledPlugins": { "superpowers@claude-plugins-official": false },
-  "env": { "ENABLE_CODE_SECURITY_REVIEW": "0" },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": false
+  },
+  "env": {
+    "ENABLE_CODE_SECURITY_REVIEW": "0"
+  },
   "permissions": {
     "deny": [
-      "Bash(firebase *)", "Bash(npx firebase *)", "Bash(npx firebase-tools *)",
-      "Bash(gcloud *)", "Bash(gsutil *)", "Bash(npm *deploy*)",
-      "Bash(*deploy.sh*)", "Bash(*setup-transcription-infra.sh*)", "Bash(docker push *)",
-      "Bash(gh pr merge *)", "Bash(gh api *)", "Bash(gh repo edit *)", "Bash(gh auth *)",
-      "Read(~/.config/gcloud/**)", "Read(~/.config/configstore/**)"
+      "Bash(firebase *)",
+      "Bash(npx firebase *)",
+      "Bash(npx firebase-tools *)",
+      "Bash(gsutil *)",
+      "Bash(npm *deploy*)",
+      "Bash(*deploy.sh*)",
+      "Bash(*setup-transcription-infra.sh*)",
+      "Bash(docker push *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh api *)",
+      "Bash(gh repo edit *)",
+      "Bash(gh auth *)",
+      "Read(~/.config/gcloud/**)",
+      "Read(~/.config/configstore/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/gcloud-readonly.py\"; rc=$?; if [ $rc -ne 0 ]; then [ $rc -eq 2 ] || echo \"gcloud hook failed (exit $rc); blocking\" >&2; exit 2; fi"
+          }
+        ]
+      }
     ]
   }
 }
