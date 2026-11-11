@@ -53,9 +53,10 @@ collapse either into `failed`.
 
 **Duplicate billing is prevented by atomic Firestore writes.** Transcode is claimed in a
 transaction (`claimVideoForTranscode`), the transcript job document is made with
-`create()` (never `set` with merge), and only `pending` may become `running`. `failed` and `needs_review` are terminal and never auto-retry.
-`needs_review` exists for the case where Speech may have accepted a job but we could not
-record it — that ambiguity is unresolvable from our side, so it waits for a human.
+`create()` (never `set` with merge), and only `pending` may become `running`. `failed`
+and `needs_review` are terminal and never auto-retry. `needs_review` exists for the case
+where Speech may have accepted a job but we could not record it — that ambiguity is
+unresolvable from our side, so it waits for a human.
 
 **Google's Speech service agent needs `roles/storage.objectCreator` on the transcripts
 bucket.** It is an implicit identity that does not exist until the Speech API has been
