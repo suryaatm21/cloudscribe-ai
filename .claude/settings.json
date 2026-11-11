@@ -82,7 +82,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/gcloud-readonly.py\""
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/gcloud-readonly.py\"; rc=$?; if [ $rc -ne 0 ]; then [ $rc -eq 2 ] || echo \"gcloud hook failed (exit $rc); blocking\" >&2; exit 2; fi"
           }
         ]
       }
