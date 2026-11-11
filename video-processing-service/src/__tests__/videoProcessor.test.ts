@@ -1,12 +1,11 @@
 import {
   processVideo,
-  TRANSCODE_DEADLINE_MS,
   uidFromVideoId,
   videoIdFromFileNames,
 } from "../videoProcessor";
 import {
   createTranscript,
-  setVideoEnsuringCreatedAt,
+  finishVideoIfProcessing,
   updateTranscriptStatus,
 } from "../firestore";
 import {
@@ -19,14 +18,13 @@ import {
   uploadAudioForTranscription,
   deleteAudioWorkFile,
   NoAudioStreamError,
-  TranscodeDeadlineError,
 } from "../storage";
 import { publishTranscriptionJob } from "../transcriptionQueue";
 import { serviceConfig } from "../config";
 
 jest.mock("../firestore", () => ({
   setVideo: jest.fn(),
-  setVideoEnsuringCreatedAt: jest.fn(),
+  finishVideoIfProcessing: jest.fn(),
   createTranscript: jest.fn(),
   updateTranscriptStatus: jest.fn(),
 }));
@@ -75,6 +73,7 @@ describe("processVideo", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     serviceConfig.enableTranscription = false;
+    (finishVideoIfProcessing as jest.Mock).mockResolvedValue(true);
   });
 
   it("processes video successfully on first attempt", async () => {
@@ -88,7 +87,7 @@ describe("processVideo", () => {
       processVideo("input.mp4", "processed-input.mp4", videoId, userId),
     ).resolves.toBeUndefined();
 
-    expect(setVideoEnsuringCreatedAt).toHaveBeenCalledWith(videoId, {
+    expect(finishVideoIfProcessing).toHaveBeenCalledWith(videoId, {
       status: "processed",
       filename: "processed-input.mp4",
       uid: userId,
@@ -231,79 +230,43 @@ describe("processVideo", () => {
       processVideo("input.mp4", "processed-input.mp4", videoId, userId),
     ).rejects.toThrow("transient failure");
 
-    expect(setVideoEnsuringCreatedAt).toHaveBeenLastCalledWith(videoId, {
+    expect(finishVideoIfProcessing).toHaveBeenLastCalledWith(videoId, {
       status: "failed",
       uid: userId,
-      error: "transient failure",
     });
     expect(downloadRawVideo).toHaveBeenCalledTimes(2);
   });
 
-  describe("transcode deadline", () => {
-    it("hands convertVideo only the budget that is left, never more than the deadline", async () => {
+  describe("conditional terminal writes", () => {
+    beforeEach(() => {
       (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
       (convertVideo as jest.Mock).mockResolvedValue(undefined);
       (uploadProcessedVideo as jest.Mock).mockResolvedValue(undefined);
       (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
       (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
-
-      await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
-
-      const timeoutArg = (convertVideo as jest.Mock).mock.calls[0][2] as number;
-      expect(timeoutArg).toBeGreaterThan(TRANSCODE_DEADLINE_MS - 5000);
-      expect(timeoutArg).toBeLessThanOrEqual(TRANSCODE_DEADLINE_MS);
-      expect(TRANSCODE_DEADLINE_MS).toBe(50 * 60 * 1000);
     });
 
-    it("marks the video failed with a clear error and does not retry when ffmpeg is killed", async () => {
-      (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
-      (convertVideo as jest.Mock).mockRejectedValue(
-        new TranscodeDeadlineError(
-          "ffmpeg conversion exceeded its 50 minute deadline and was killed",
-        ),
-      );
-      (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
-      (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    it("discards a late success without transcribing when the sweeper already failed the video", async () => {
+      (finishVideoIfProcessing as jest.Mock).mockResolvedValue(false);
 
       await expect(
         processVideo("input.mp4", "processed-input.mp4", videoId, userId),
-      ).rejects.toBeInstanceOf(TranscodeDeadlineError);
+      ).resolves.toBeUndefined();
 
-      // maxAttempts is 2 in this suite; a deadline must not use the second.
-      expect(convertVideo).toHaveBeenCalledTimes(1);
-      expect(uploadProcessedVideo).not.toHaveBeenCalled();
-      expect(setVideoEnsuringCreatedAt).toHaveBeenLastCalledWith(videoId, {
-        status: "failed",
-        uid: userId,
-        error: "ffmpeg conversion exceeded its 50 minute deadline and was killed",
-      });
+      expect(finishVideoIfProcessing).toHaveBeenCalledTimes(1);
+      expect(extractAudio).not.toHaveBeenCalled();
+      expect(createTranscript).not.toHaveBeenCalled();
+      expect(publishTranscriptionJob).not.toHaveBeenCalled();
+      expect(deleteRawVideo).toHaveBeenCalledWith("input.mp4");
     });
 
-    it("refuses to start ffmpeg once the whole budget is spent", async () => {
-      const realNow = Date.now;
-      let calls = 0;
-      // First read sets the deadline; every later read is past it.
-      jest.spyOn(Date, "now").mockImplementation(() => {
-        calls += 1;
-        return calls === 1 ? realNow() : realNow() + TRANSCODE_DEADLINE_MS + 1;
-      });
-      (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
-      (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
-      (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    it("still throws the processing error when a late failure write is rejected", async () => {
+      (downloadRawVideo as jest.Mock).mockRejectedValue(new Error("boom"));
+      (finishVideoIfProcessing as jest.Mock).mockResolvedValue(false);
 
-      try {
-        await expect(
-          processVideo("input.mp4", "processed-input.mp4", videoId, userId),
-        ).rejects.toBeInstanceOf(TranscodeDeadlineError);
-      } finally {
-        jest.restoreAllMocks();
-      }
-
-      expect(convertVideo).not.toHaveBeenCalled();
-      expect(setVideoEnsuringCreatedAt).toHaveBeenLastCalledWith(
-        videoId,
-        expect.objectContaining({ status: "failed", error: expect.stringContaining("budget") }),
-      );
+      await expect(
+        processVideo("input.mp4", "processed-input.mp4", videoId, userId),
+      ).rejects.toThrow("boom");
     });
   });
 });

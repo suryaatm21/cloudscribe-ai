@@ -22,78 +22,6 @@ export function isNoAudioStreamError(
   return error instanceof NoAudioStreamError;
 }
 
-/**
- * An ffmpeg process ran past its deadline and was killed. Not retryable: a run
- * that already used its whole budget will not fit on a second try, and retrying
- * would let the transcode outlive the request that is supposed to bound it.
- */
-export class TranscodeDeadlineError extends Error {
-  constructor(message = 'ffmpeg was killed after exceeding its deadline') {
-    super(message);
-    this.name = 'TranscodeDeadlineError';
-  }
-}
-
-export function isTranscodeDeadlineError(
-  error: unknown,
-): error is TranscodeDeadlineError {
-  return error instanceof TranscodeDeadlineError;
-}
-
-/**
- * Runs an ffmpeg command to completion, SIGKILLing it if it is still running
- * after `timeoutMs`. Cloud Run's request timeout ends the HTTP request but does
- * not stop a child process, so without this an ffmpeg run can outlive the
- * request and the stuck-transcode sweep bound.
- *
- * Rejects with `TranscodeDeadlineError` as soon as the deadline fires, without
- * waiting for the kill to be reported. `timeoutMs` undefined means no deadline.
- */
-function runFfmpegWithDeadline(
-  command: ffmpeg.FfmpegCommand,
-  label: string,
-  timeoutMs: number | undefined,
-  start: (command: ffmpeg.FfmpegCommand) => void,
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    let timedOut = false;
-    let timer: NodeJS.Timeout | undefined;
-    if (timeoutMs !== undefined) {
-      timer = setTimeout(() => {
-        timedOut = true;
-        command.kill('SIGKILL');
-        logger.error('ffmpeg exceeded its deadline and was killed', {
-          component: 'storage',
-          step: label,
-          timeoutMs,
-        });
-        reject(
-          new TranscodeDeadlineError(
-            `ffmpeg ${label} exceeded its ${Math.round(timeoutMs / 60000)} minute deadline and was killed`,
-          ),
-        );
-      }, timeoutMs);
-    }
-    command
-      // fluent-ffmpeg spawns after an async capability check, so a kill that
-      // fired before the process existed has to be repeated once it has started.
-      .on('start', () => {
-        if (timedOut) {
-          command.kill('SIGKILL');
-        }
-      })
-      .on('end', () => {
-        clearTimeout(timer);
-        resolve();
-      })
-      .on('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    start(command);
-  });
-}
-
 const storage = new Storage();
 
 const rawVideoBucketName = serviceConfig.rawVideoBucketName;
@@ -126,37 +54,30 @@ export function setupDirectories() {
  * (see docs/project-limitations.md).
  * @param {string} rawVideoName - The name of the raw video file.
  * @param {string} processedVideoName - The name of the processed video file.
- * @param {number} [timeoutMs] - Kill ffmpeg and reject with `TranscodeDeadlineError` after this long.
  * @returns {Promise<void>} A promise that resolves when the conversion is complete.
  */
-export function convertVideo(
-  rawVideoName: string,
-  processedVideoName: string,
-  timeoutMs?: number,
-): Promise<void> {
-  return runFfmpegWithDeadline(
-    ffmpeg(`${localRawVideoPath}/${rawVideoName}`),
-    'conversion',
-    timeoutMs,
-    (command) => command.save(`${localProcessedVideoPath}/${processedVideoName}`),
-  ).then(
-    () => {
-      logger.info('Video conversion finished', {
-        component: 'storage',
-        inputFile: rawVideoName,
-        outputFile: processedVideoName,
-      });
-    },
-    (err) => {
-      logger.error('ffmpeg conversion error', {
-        component: 'storage',
-        inputFile: rawVideoName,
-        outputFile: processedVideoName,
-        error: err instanceof Error ? err.message : err,
-      });
-      throw err;
-    },
-  );
+export function convertVideo(rawVideoName: string, processedVideoName: string) {
+  return new Promise<void>((resolve, reject) => {
+    ffmpeg(`${localRawVideoPath}/${rawVideoName}`)
+      .on('end', () => {
+        logger.info('Video conversion finished', {
+          component: 'storage',
+          inputFile: rawVideoName,
+          outputFile: processedVideoName,
+        });
+        resolve();
+      })
+      .on('error', (err) => {
+        logger.error('ffmpeg conversion error', {
+          component: 'storage',
+          inputFile: rawVideoName,
+          outputFile: processedVideoName,
+          error: err instanceof Error ? err.message : err,
+        });
+        reject(err);
+      })
+      .save(`${localProcessedVideoPath}/${processedVideoName}`);
+  });
 }
 
 /**
@@ -183,13 +104,11 @@ export function probeHasAudioStream(filePath: string): Promise<boolean> {
  * Extracts audio from a processed video file and stores it locally as FLAC.
  * @param {string} processedVideoName - The name of the processed video file.
  * @param {string} audioFileName - The target audio file name (should end with .flac).
- * @param {number} [timeoutMs] - Kill ffmpeg and reject with `TranscodeDeadlineError` after this long.
  * @returns {Promise<void>} A promise resolved when extraction completes.
  */
 export async function extractAudio(
   processedVideoName: string,
   audioFileName: string,
-  timeoutMs?: number,
 ): Promise<void> {
   const inputPath = `${localProcessedVideoPath}/${processedVideoName}`;
 
@@ -200,29 +119,31 @@ export async function extractAudio(
     throw new NoAudioStreamError();
   }
 
-  return runFfmpegWithDeadline(
-    ffmpeg(inputPath).noVideo().audioChannels(1).audioFrequency(16000).audioCodec('flac'),
-    'audio extraction',
-    timeoutMs,
-    (command) => command.save(`${localAudioWorkPath}/${audioFileName}`),
-  ).then(
-    () => {
-      logger.info('Audio extraction finished', {
-        component: 'storage',
-        inputFile: processedVideoName,
-        outputFile: audioFileName,
-      });
-    },
-    (err) => {
-      logger.error('Audio extraction error', {
-        component: 'storage',
-        inputFile: processedVideoName,
-        outputFile: audioFileName,
-        error: err instanceof Error ? err.message : err,
-      });
-      throw err;
-    },
-  );
+  return new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .noVideo()
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .audioCodec('flac')
+      .on('end', () => {
+        logger.info('Audio extraction finished', {
+          component: 'storage',
+          inputFile: processedVideoName,
+          outputFile: audioFileName,
+        });
+        resolve();
+      })
+      .on('error', (err) => {
+        logger.error('Audio extraction error', {
+          component: 'storage',
+          inputFile: processedVideoName,
+          outputFile: audioFileName,
+          error: err instanceof Error ? err.message : err,
+        });
+        reject(err);
+      })
+      .save(`${localAudioWorkPath}/${audioFileName}`);
+  });
 }
 
 /**

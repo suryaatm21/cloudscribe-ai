@@ -32,7 +32,7 @@ export interface Video {
   description?: string;
   /**
    * Upload time, and the home page sort key. Normally written by the
-   * `finalizeUpload` callable; see `setVideoEnsuringCreatedAt` for why the
+   * `finalizeUpload` callable; see `finishVideoIfProcessing` for why the
    * worker backfills it.
    */
   createdAt?: Timestamp;
@@ -189,30 +189,32 @@ export function setVideo(videoId: string, video: Video) {
 }
 
 /**
- * Same as `setVideo`, but guarantees the document ends up with a `createdAt`.
+ * Worker terminal write (`processed` or `failed`). Applies only while the video
+ * is still `processing`, so a late worker can never overwrite the `failed`
+ * status the stuck-transcode sweeper wrote. Returns whether it was applied.
  *
- * The home page orders by `createdAt`, and Firestore omits documents that are
- * missing the ordered field entirely — so a video without it is invisible, not
- * just misplaced. `finalizeUpload` normally sets it, but that call can be lost
- * (tab closed between the upload finishing and the callable returning), and the
- * worker is the last writer that can still repair it.
- *
- * Transactional read-then-write because a plain merge would clobber the real
- * upload time with whenever transcoding happened to finish.
+ * Also guarantees `createdAt`: the home page orders by it and Firestore omits
+ * documents missing the ordered field, so a video without it is invisible. The
+ * read-then-write is transactional so a merge cannot clobber the real upload
+ * time.
  */
-export async function setVideoEnsuringCreatedAt(
+export async function finishVideoIfProcessing(
   videoId: string,
   video: Video,
-): Promise<void> {
+): Promise<boolean> {
   const ref = firestore.collection(videoCollectionId).doc(videoId);
-  await firestore.runTransaction(async (tx) => {
+  return firestore.runTransaction(async (tx) => {
     const snapshot = await tx.get(ref);
     const existing = snapshot.exists ? (snapshot.data() as Video) : undefined;
+    if (existing?.status !== "processing") {
+      return false;
+    }
     const payload: Video = { ...video };
-    if (!existing?.createdAt) {
+    if (!existing.createdAt) {
       payload.createdAt = createdAtFromVideoId(videoId) ?? Timestamp.now();
     }
     tx.set(ref, payload, { merge: true });
+    return true;
   });
 }
 
@@ -254,7 +256,7 @@ export function createdAtFromVideoId(videoId: string): Timestamp | undefined {
  * unclaimed state. Job documents the worker owns outright (transcripts) do use
  * `create()`; see `createTranscript`.
  *
- * Also backfills `createdAt` the way `setVideoEnsuringCreatedAt` does, and
+ * Also backfills `createdAt` the way `finishVideoIfProcessing` does, and
  * stamps `processingStartedAt` so the sweeper can tell a stuck claim from a
  * live one.
  */

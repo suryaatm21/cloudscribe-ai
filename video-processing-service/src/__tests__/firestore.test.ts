@@ -3,6 +3,7 @@ import {
   createTranscript,
   claimVideoForTranscode,
   failStuckVideo,
+  finishVideoIfProcessing,
   isTranscodeStale,
   Video,
   evaluateTranscriptClaim,
@@ -484,6 +485,41 @@ describe("failStuckVideo", () => {
   it("returns false for a missing document", async () => {
     installVideoStore(undefined);
     await expect(failStuckVideo("v1", now, staleAfter, "stuck")).resolves.toBe(false);
+  });
+});
+
+describe("finishVideoIfProcessing", () => {
+  const now = 1_800_000_000_000;
+  const staleAfter = 2 * 60 * 60 * 1000;
+  const old = { toMillis: () => now - staleAfter * 2 };
+
+  it("records the result while the video is still processing", async () => {
+    const store = installVideoStore({ status: "processing", createdAt: old as never });
+    await expect(
+      finishVideoIfProcessing("v1", { status: "processed", filename: "f.mp4", uid: "u" }),
+    ).resolves.toBe(true);
+    expect(store.data?.status).toBe("processed");
+  });
+
+  it("a late zombie cannot overwrite the sweeper's failed status", async () => {
+    const store = installVideoStore({ status: "processing", processingStartedAt: old as never });
+    await expect(failStuckVideo("v1", now, staleAfter, "stuck")).resolves.toBe(true);
+    await expect(
+      finishVideoIfProcessing("v1", { status: "processed", filename: "f.mp4", uid: "u" }),
+    ).resolves.toBe(false);
+    await expect(
+      finishVideoIfProcessing("v1", { status: "failed", uid: "u" }),
+    ).resolves.toBe(false);
+    expect(store.data?.status).toBe("failed");
+    expect(store.data?.error).toBe("stuck");
+  });
+
+  it("does nothing for a missing document", async () => {
+    const store = installVideoStore(undefined);
+    await expect(
+      finishVideoIfProcessing("v1", { status: "failed", uid: "u" }),
+    ).resolves.toBe(false);
+    expect(store.data).toBeUndefined();
   });
 });
 

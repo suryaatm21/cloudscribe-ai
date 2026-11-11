@@ -8,13 +8,11 @@ import {
   uploadAudioForTranscription,
   deleteAudioWorkFile,
   isNoAudioStreamError,
-  isTranscodeDeadlineError,
-  TranscodeDeadlineError,
 } from "./storage";
 import { Timestamp } from "firebase-admin/firestore";
 import {
   createTranscript,
-  setVideoEnsuringCreatedAt,
+  finishVideoIfProcessing,
   updateTranscriptStatus,
 } from "./firestore";
 import { serviceConfig } from "./config";
@@ -22,17 +20,6 @@ import { logger } from "./logger";
 import { publishTranscriptionJob } from "./transcriptionQueue";
 
 const DEFAULT_TRANSCRIPT_ID = "primary";
-
-/**
- * Total ffmpeg budget for one video, shared by every attempt and by audio
- * extraction. Cloud Run ends the request at 3600 s but does not stop a child
- * process, so ffmpeg is killed at this deadline instead. That keeps all
- * transcode work inside the request, which is what makes the 2 h stuck-transcode
- * sweep bound (see `/reconcile-transcripts`) safe: after 50 minutes ffmpeg is
- * dead, so a claim older than 2 h cannot belong to a live transcode. Download
- * and upload are not covered; ffmpeg is the only step with no natural limit.
- */
-export const TRANSCODE_DEADLINE_MS = 50 * 60 * 1000;
 
 /**
  * Processes a video by downloading, converting, uploading, and updating its status.
@@ -50,16 +37,6 @@ export async function processVideo(
   userId: string,
 ): Promise<void> {
   const maxAttempts = serviceConfig.processingMaxAttempts;
-  const deadlineAt = Date.now() + TRANSCODE_DEADLINE_MS;
-  const remainingMs = () => {
-    const remaining = deadlineAt - Date.now();
-    if (remaining <= 0) {
-      throw new TranscodeDeadlineError(
-        `Transcoding used its ${TRANSCODE_DEADLINE_MS / 60000} minute budget before ffmpeg could finish`,
-      );
-    }
-    return remaining;
-  };
   let attempt = 0;
   let lastError: unknown;
 
@@ -76,22 +53,25 @@ export async function processVideo(
       });
 
       await downloadRawVideo(inputFileName);
-      await convertVideo(inputFileName, outputFileName, remainingMs());
+      await convertVideo(inputFileName, outputFileName);
       await uploadProcessedVideo(outputFileName);
 
-      await setVideoEnsuringCreatedAt(videoId, {
+      const finished = await finishVideoIfProcessing(videoId, {
         status: "processed",
         filename: outputFileName,
         uid: userId,
       });
+      if (!finished) {
+        logger.warn("Video no longer processing; discarding late result", {
+          jobId: videoId,
+          component: "videoProcessor",
+        });
+        await cleanupFiles(inputFileName, outputFileName);
+        return;
+      }
 
       if (serviceConfig.enableTranscription) {
-        await triggerTranscriptionPipeline(
-          videoId,
-          outputFileName,
-          userId,
-          remainingMs,
-        );
+        await triggerTranscriptionPipeline(videoId, outputFileName, userId);
       }
 
       await Promise.all([
@@ -116,11 +96,6 @@ export async function processVideo(
       });
       await cleanupFiles(inputFileName, outputFileName);
 
-      if (isTranscodeDeadlineError(err)) {
-        // The budget is spent; another attempt would outlive the request.
-        break;
-      }
-
       if (attempt < maxAttempts) {
         logger.warn("Retrying video processing after failure", {
           jobId: videoId,
@@ -137,11 +112,16 @@ export async function processVideo(
     lastError instanceof Error
       ? lastError
       : new Error("Video processing failed after retries");
-  await setVideoEnsuringCreatedAt(videoId, {
+  const failedApplied = await finishVideoIfProcessing(videoId, {
     status: "failed",
     uid: userId,
-    error: errorToThrow.message,
   });
+  if (!failedApplied) {
+    logger.warn("Video no longer processing; not recording failure", {
+      jobId: videoId,
+      component: "videoProcessor",
+    });
+  }
   logger.error("Exhausted video processing attempts", {
     jobId: videoId,
     component: "videoProcessor",
@@ -219,19 +199,17 @@ export function uidFromVideoId(videoId: string): string | null {
  * @param videoId - The unique video identifier
  * @param processedFileName - The processed video filename
  * @param userId - The user ID who owns the video
- * @param remainingMs - Returns the ffmpeg budget left; throws once it is spent
  */
 async function triggerTranscriptionPipeline(
   videoId: string,
   processedFileName: string,
   userId: string,
-  remainingMs: () => number,
 ) {
   const transcriptId = DEFAULT_TRANSCRIPT_ID;
   const audioFileName = `${videoId}.flac`;
 
   try {
-    await extractAudio(processedFileName, audioFileName, remainingMs());
+    await extractAudio(processedFileName, audioFileName);
     const audioGcsUri = await uploadAudioForTranscription(audioFileName);
 
     const created = await createTranscript(videoId, transcriptId, {
