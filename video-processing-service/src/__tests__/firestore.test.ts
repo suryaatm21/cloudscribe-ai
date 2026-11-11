@@ -497,7 +497,7 @@ describe("finishVideoIfProcessing", () => {
     const store = installVideoStore({ status: "processing", createdAt: old as never });
     await expect(
       finishVideoIfProcessing("v1", { status: "processed", filename: "f.mp4", uid: "u" }),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ applied: true, status: "processing" });
     expect(store.data?.status).toBe("processed");
   });
 
@@ -506,10 +506,10 @@ describe("finishVideoIfProcessing", () => {
     await expect(failStuckVideo("v1", now, staleAfter, "stuck")).resolves.toBe(true);
     await expect(
       finishVideoIfProcessing("v1", { status: "processed", filename: "f.mp4", uid: "u" }),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ applied: false, status: "failed" });
     await expect(
       finishVideoIfProcessing("v1", { status: "failed", uid: "u" }),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ applied: false, status: "failed" });
     expect(store.data?.status).toBe("failed");
     expect(store.data?.error).toBe("stuck");
   });
@@ -518,8 +518,17 @@ describe("finishVideoIfProcessing", () => {
     const store = installVideoStore(undefined);
     await expect(
       finishVideoIfProcessing("v1", { status: "failed", uid: "u" }),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ applied: false, status: undefined });
     expect(store.data).toBeUndefined();
+  });
+
+  it("reports processed when this request's own earlier write already landed", async () => {
+    const store = installVideoStore({ status: "processing", createdAt: old as never });
+    await finishVideoIfProcessing("v1", { status: "processed", filename: "f.mp4", uid: "u" });
+    await expect(
+      finishVideoIfProcessing("v1", { status: "processed", filename: "f.mp4", uid: "u" }),
+    ).resolves.toEqual({ applied: false, status: "processed" });
+    expect(store.version).toBe(1);
   });
 });
 

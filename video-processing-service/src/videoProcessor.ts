@@ -61,13 +61,26 @@ export async function processVideo(
         filename: outputFileName,
         uid: userId,
       });
-      if (!finished) {
-        logger.warn("Video no longer processing; discarding late result", {
+      if (!finished.applied) {
+        if (finished.status !== "processed") {
+          // `failed` means the stuck-transcode sweeper took this video; a late
+          // result must not overwrite it.
+          logger.warn("Video no longer processing; discarding late result", {
+            jobId: videoId,
+            component: "videoProcessor",
+            status: finished.status,
+          });
+          await cleanupFiles(inputFileName, outputFileName);
+          return;
+        }
+        // `processed` is this request's own earlier attempt: it failed after
+        // that write (transcript step, cleanup). Carry on so the retry still
+        // reaches the transcript work; create() keeps that duplicate-safe.
+        logger.info("Video already processed by an earlier attempt; continuing", {
           jobId: videoId,
           component: "videoProcessor",
+          attempt,
         });
-        await cleanupFiles(inputFileName, outputFileName);
-        return;
       }
 
       if (serviceConfig.enableTranscription) {
@@ -112,11 +125,11 @@ export async function processVideo(
     lastError instanceof Error
       ? lastError
       : new Error("Video processing failed after retries");
-  const failedApplied = await finishVideoIfProcessing(videoId, {
+  const failedResult = await finishVideoIfProcessing(videoId, {
     status: "failed",
     uid: userId,
   });
-  if (!failedApplied) {
+  if (!failedResult.applied) {
     logger.warn("Video no longer processing; not recording failure", {
       jobId: videoId,
       component: "videoProcessor",

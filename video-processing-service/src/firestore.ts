@@ -189,9 +189,21 @@ export function setVideo(videoId: string, video: Video) {
 }
 
 /**
+ * Result of a worker terminal write: whether it was applied, and the status the
+ * transaction saw. `status` lets the caller tell the sweeper's `failed` (give
+ * up) from `processed` written by an earlier attempt of the same request
+ * (carry on).
+ */
+export interface VideoFinishResult {
+  applied: boolean;
+  status: Video["status"];
+}
+
+/**
  * Worker terminal write (`processed` or `failed`). Applies only while the video
  * is still `processing`, so a late worker can never overwrite the `failed`
- * status the stuck-transcode sweeper wrote. Returns whether it was applied.
+ * status the stuck-transcode sweeper wrote. Returns whether it was applied and
+ * the status it saw.
  *
  * Also guarantees `createdAt`: the home page orders by it and Firestore omits
  * documents missing the ordered field, so a video without it is invisible. The
@@ -201,20 +213,20 @@ export function setVideo(videoId: string, video: Video) {
 export async function finishVideoIfProcessing(
   videoId: string,
   video: Video,
-): Promise<boolean> {
+): Promise<VideoFinishResult> {
   const ref = firestore.collection(videoCollectionId).doc(videoId);
   return firestore.runTransaction(async (tx) => {
     const snapshot = await tx.get(ref);
     const existing = snapshot.exists ? (snapshot.data() as Video) : undefined;
     if (existing?.status !== "processing") {
-      return false;
+      return { applied: false, status: existing?.status };
     }
     const payload: Video = { ...video };
     if (!existing.createdAt) {
       payload.createdAt = createdAtFromVideoId(videoId) ?? Timestamp.now();
     }
     tx.set(ref, payload, { merge: true });
-    return true;
+    return { applied: true, status: existing.status };
   });
 }
 
