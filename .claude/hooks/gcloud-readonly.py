@@ -38,11 +38,11 @@ def deny(reason):
 
 def check_segment(seg):
     rest = seg
-    if not any("gcloud" in t for t in rest):
+    if not any("gcloud" in t.lower() for t in rest):
         return False
-    if rest[0] != "gcloud":
+    if rest[0].lower() != "gcloud":
         deny(f"gcloud not invoked directly ({rest[0]})")
-    if any("gcloud" in t for t in rest[1:]):
+    if any("gcloud" in t.lower() for t in rest[1:]):
         deny("gcloud appears as an argument")
     pos = []
     for t in rest[1:]:
@@ -64,8 +64,8 @@ def main():
         deny("could not read hook input")
     if not isinstance(command, str):
         deny("could not read hook input")
-    probe = command.replace("\\", "").replace("'", "").replace('"', "")
-    if "gcloud" not in command and "gcloud" not in probe:
+    probe = command.replace("\\", "").replace("'", "").replace('"', "").lower()
+    if "gcloud" not in command.lower() and "gcloud" not in probe:
         return
     if re.search(r"[`$<>{}]", command):
         deny("substitution, redirection or expansion near gcloud")
