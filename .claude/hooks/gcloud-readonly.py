@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""PreToolUse hook for Bash: the single source of truth for agent gcloud access.
+
+Allows a gcloud call only when every segment of the command matches an exact
+read-only path in ALLOWED_PATHS; anything else that mentions gcloud is denied
+(exit 2). Commands that never mention gcloud pass through untouched. The
+settings.json wrapper turns any hook crash into a deny. To permit another read,
+add its exact path here and a case in test_readonly_hook.py.
+"""
 import json
 import re
 import shlex
