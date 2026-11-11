@@ -118,7 +118,6 @@ describe("processVideo", () => {
     expect(extractAudio).toHaveBeenCalledWith(
       "processed-input.mp4",
       `${videoId}.flac`,
-      expect.any(Number),
     );
     expect(createTranscript).toHaveBeenCalledWith(
       videoId,
