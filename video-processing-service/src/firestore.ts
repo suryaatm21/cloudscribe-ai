@@ -287,7 +287,9 @@ export async function claimVideoForTranscode(
  * Videos currently claimed for transcoding. A single-field equality query, so
  * it needs no composite index.
  */
-export async function listProcessingVideos(): Promise<Video[]> {
+export async function listProcessingVideos(): Promise<
+  Array<Video & { id: string }>
+> {
   const snapshot = await firestore
     .collection(videoCollectionId)
     .where("status", "==", "processing")
