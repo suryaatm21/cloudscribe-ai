@@ -37,12 +37,7 @@ def deny(reason):
 
 
 def check_segment(seg):
-    i = 0
-    while i < len(seg) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", seg[i]):
-        if "gcloud" in seg[i]:
-            deny("gcloud inside an env assignment")
-        i += 1
-    rest = seg[i:]
+    rest = seg
     if not any("gcloud" in t for t in rest):
         return False
     if rest[0] != "gcloud":
