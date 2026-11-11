@@ -30,6 +30,11 @@ interface IServiceConfig {
   speechProcessingStrategy: SpeechProcessingStrategy;
   processingMaxAttempts: number;
   reconcileStaleAfterMs: number;
+  /**
+   * How long a video may stay `processing` before the sweeper fails it. Must
+   * exceed the Cloud Run request timeout (3600 s) or live transcodes get failed.
+   */
+  transcodeStaleAfterMs: number;
   projectId?: string;
   region?: string;
   serviceName?: string;
@@ -207,6 +212,10 @@ export const serviceConfig: IServiceConfig = {
   reconcileStaleAfterMs: getNumericEnvVar(
     "RECONCILE_STALE_AFTER_MS",
     30 * 60 * 1000,
+  ),
+  transcodeStaleAfterMs: getNumericEnvVar(
+    "TRANSCODE_STALE_AFTER_MS",
+    2 * 60 * 60 * 1000,
   ),
   projectId:
     getEnvVar("PROJECT_ID") ??

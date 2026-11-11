@@ -1,5 +1,10 @@
 import {
   createdAtFromVideoId,
+  createTranscript,
+  claimVideoForTranscode,
+  failStuckVideo,
+  isTranscodeStale,
+  Video,
   evaluateTranscriptClaim,
   claimTranscriptJob,
   buildTranscriptStatusUpdate,
@@ -245,6 +250,240 @@ describe("claimTranscriptJob concurrency", () => {
     expect(kinds).toEqual(["claim-in-progress", "claimed"]);
     expect(store.data.status).toBe("running");
     expect(store.version).toBe(1);
+  });
+});
+
+type VideoTx = {
+  get: () => Promise<{ exists: boolean; data: () => unknown }>;
+  set: (_ref: unknown, mutation: Partial<Video>, _opts?: unknown) => void;
+};
+
+/**
+ * In-memory stand-in for one Firestore document with optimistic-retry
+ * transactions, the same shape as the claimTranscriptJob concurrency test: a
+ * transaction whose snapshot went stale before commit is retried.
+ * Synthetic (hand-built), not observed Firestore behavior.
+ */
+function installVideoStore(
+  initial: Partial<Video> | undefined,
+  options: { holdForSecondReader?: boolean } = {},
+) {
+  const store: { version: number; data: Partial<Video> | undefined } = {
+    version: 0,
+    data: initial,
+  };
+  let arrivals = 0;
+  let releaseFirstWave: () => void = () => {};
+  const firstWave = new Promise<void>((resolve) => {
+    releaseFirstWave = resolve;
+  });
+  let firstWaveReleased = !options.holdForSecondReader;
+
+  const { Firestore } = jest.requireMock("firebase-admin/firestore") as {
+    Firestore: {
+      prototype: {
+        runTransaction: (fn: (tx: VideoTx) => Promise<unknown>) => Promise<unknown>;
+      };
+    };
+  };
+
+  Firestore.prototype.runTransaction = async function runTransaction(fn) {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const snapVersion = store.version;
+      const snapData = store.data ? { ...store.data } : undefined;
+      let pendingWrite: Partial<Video> | undefined;
+      const result = await fn({
+        get: async () => {
+          arrivals += 1;
+          // Hold the first reader until a second one has also read, so both
+          // transactions see the same pre-claim snapshot.
+          if (!firstWaveReleased && arrivals >= 2) {
+            firstWaveReleased = true;
+            releaseFirstWave();
+          }
+          if (!firstWaveReleased) {
+            await firstWave;
+          }
+          return { exists: snapData !== undefined, data: () => snapData };
+        },
+        set: (_ref, mutation) => {
+          pendingWrite = mutation;
+        },
+      });
+      if (store.version !== snapVersion) {
+        continue;
+      }
+      if (pendingWrite) {
+        store.data = { ...(store.data ?? {}), ...pendingWrite };
+        store.version += 1;
+      }
+      return result;
+    }
+    throw new Error("transaction retries exhausted");
+  };
+  return store;
+}
+
+describe("claimVideoForTranscode concurrency", () => {
+  it("lets exactly one of two overlapping deliveries claim an upload-created video", async () => {
+    // finalizeUpload already wrote the doc (title, createdAt) with no status.
+    const store = installVideoStore(
+      { id: "uid-1762753390224", uid: "uid", title: "Lecture 1" },
+      { holdForSecondReader: true },
+    );
+
+    const results = await Promise.all([
+      claimVideoForTranscode("uid-1762753390224", "uid"),
+      claimVideoForTranscode("uid-1762753390224", "uid"),
+    ]);
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(store.version).toBe(1);
+    expect(store.data?.status).toBe("processing");
+    expect(store.data?.processingStartedAt).toBeDefined();
+    expect(store.data?.title).toBe("Lecture 1"); // merge, not overwrite
+  });
+
+  it("also works when the doc does not exist yet, and backfills createdAt", async () => {
+    const store = installVideoStore(undefined, { holdForSecondReader: true });
+    const results = await Promise.all([
+      claimVideoForTranscode("uid-1762753390224", "uid"),
+      claimVideoForTranscode("uid-1762753390224", "uid"),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(store.data?.createdAt).toBeDefined();
+  });
+
+  it.each(["processing", "processed", "failed"] as const)(
+    "refuses a video that is already %s",
+    async (status) => {
+      const store = installVideoStore({ uid: "uid", status });
+      await expect(claimVideoForTranscode("uid-1762753390224", "uid")).resolves.toBe(
+        false,
+      );
+      expect(store.version).toBe(0);
+    },
+  );
+});
+
+describe("createTranscript", () => {
+  const payload = {
+    status: "pending" as const,
+    source: "batch" as const,
+    language: "en-US",
+    model: "long",
+  };
+
+  function installCreate(create: jest.Mock) {
+    const { Firestore } = jest.requireMock("firebase-admin/firestore") as {
+      Firestore: { prototype: { create?: jest.Mock } };
+    };
+    Firestore.prototype.create = create;
+  }
+
+  it("uses create() so an existing transcript is never overwritten", async () => {
+    const alreadyExists = Object.assign(new Error("6 ALREADY_EXISTS"), { code: 6 });
+    const create = jest
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(alreadyExists);
+    installCreate(create);
+
+    await expect(createTranscript("v1", "primary", payload)).resolves.toBe(true);
+    await expect(createTranscript("v1", "primary", payload)).resolves.toBe(false);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it("still throws errors other than ALREADY_EXISTS", async () => {
+    installCreate(
+      jest.fn().mockRejectedValue(Object.assign(new Error("unavailable"), { code: 14 })),
+    );
+    await expect(createTranscript("v1", "primary", payload)).rejects.toThrow(
+      "unavailable",
+    );
+  });
+});
+
+describe("stuck transcode detection", () => {
+  const now = 1_800_000_000_000;
+  const staleAfter = 2 * 60 * 60 * 1000;
+  const ts = (ageMs: number) =>
+    ({ toMillis: () => now - ageMs }) as unknown as Video["createdAt"];
+
+  it("is stale only past the threshold, measured from processingStartedAt", () => {
+    expect(
+      isTranscodeStale(
+        { status: "processing", processingStartedAt: ts(staleAfter + 1) },
+        now,
+        staleAfter,
+      ),
+    ).toBe(true);
+    expect(
+      isTranscodeStale(
+        { status: "processing", processingStartedAt: ts(staleAfter - 1) },
+        now,
+        staleAfter,
+      ),
+    ).toBe(false);
+  });
+
+  it("prefers processingStartedAt over an older createdAt", () => {
+    expect(
+      isTranscodeStale(
+        {
+          status: "processing",
+          createdAt: ts(staleAfter * 10),
+          processingStartedAt: ts(1000),
+        },
+        now,
+        staleAfter,
+      ),
+    ).toBe(false);
+  });
+
+  it("falls back to createdAt, and treats a doc with neither as stale", () => {
+    expect(
+      isTranscodeStale({ status: "processing", createdAt: ts(staleAfter + 1) }, now, staleAfter),
+    ).toBe(true);
+    expect(isTranscodeStale({ status: "processing" }, now, staleAfter)).toBe(true);
+  });
+
+  it("never marks a non-processing video stale", () => {
+    expect(
+      isTranscodeStale({ status: "processed", createdAt: ts(staleAfter * 5) }, now, staleAfter),
+    ).toBe(false);
+  });
+});
+
+describe("failStuckVideo", () => {
+  const now = 1_800_000_000_000;
+  const staleAfter = 2 * 60 * 60 * 1000;
+  const old = { toMillis: () => now - staleAfter * 2 };
+
+  it("fails a stale processing video", async () => {
+    const store = installVideoStore({ status: "processing", processingStartedAt: old as never });
+    await expect(failStuckVideo("v1", now, staleAfter, "stuck")).resolves.toBe(true);
+    expect(store.data?.status).toBe("failed");
+    expect(store.data?.error).toBe("stuck");
+  });
+
+  it("does not overwrite a video the worker finished after it was listed", async () => {
+    const store = installVideoStore({ status: "processed", processingStartedAt: old as never });
+    await expect(failStuckVideo("v1", now, staleAfter, "stuck")).resolves.toBe(false);
+    expect(store.data?.status).toBe("processed");
+    expect(store.version).toBe(0);
+  });
+
+  it("leaves a video that is still within the bound", async () => {
+    const fresh = { toMillis: () => now - 1000 };
+    const store = installVideoStore({ status: "processing", processingStartedAt: fresh as never });
+    await expect(failStuckVideo("v1", now, staleAfter, "stuck")).resolves.toBe(false);
+    expect(store.data?.status).toBe("processing");
+  });
+
+  it("returns false for a missing document", async () => {
+    installVideoStore(undefined);
+    await expect(failStuckVideo("v1", now, staleAfter, "stuck")).resolves.toBe(false);
   });
 });
 

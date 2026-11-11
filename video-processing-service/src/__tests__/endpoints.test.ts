@@ -3,7 +3,10 @@ import { AddressInfo } from "net";
 import { serviceConfig } from "../config";
 import {
   claimTranscriptJob,
+  claimVideoForTranscode,
+  failStuckVideo,
   getTranscript,
+  listProcessingVideos,
   listTranscriptsForReconcile,
   updateTranscript,
   updateTranscriptStatus,
@@ -18,6 +21,7 @@ import {
 } from "../transcription";
 import { logger } from "../logger";
 import { app } from "../index";
+import { processVideo, uidFromVideoId, videoIdFromFileNames } from "../videoProcessor";
 
 jest.mock("firebase-admin", () => ({
   credential: { applicationDefault: jest.fn() },
@@ -50,6 +54,7 @@ jest.mock("../config", () => ({
     normalizedTranscriptPrefix: "normalized",
     transcriptsBucketName: "atmuri-yt-transcripts",
     reconcileStaleAfterMs: 1,
+    transcodeStaleAfterMs: 2 * 60 * 60 * 1000,
     environment: "test",
     speechToTextLanguage: "en-US",
     speechToTextModel: "long",
@@ -88,11 +93,13 @@ jest.mock("../firestore", () => {
   return {
     ...actual,
     claimTranscriptJob: jest.fn(),
+    claimVideoForTranscode: jest.fn(),
+    failStuckVideo: jest.fn(),
     getTranscript: jest.fn(),
+    listProcessingVideos: jest.fn(),
     listTranscriptsForReconcile: jest.fn(),
     updateTranscript: jest.fn(),
     updateTranscriptStatus: jest.fn(),
-    isVideoNew: jest.fn(),
     setVideo: jest.fn(),
   };
 });
@@ -164,6 +171,47 @@ describe("transcription HTTP endpoints", () => {
     serviceConfig.enableTranscription = true;
     (updateTranscript as jest.Mock).mockResolvedValue(undefined);
     (updateTranscriptStatus as jest.Mock).mockResolvedValue(true);
+    (listProcessingVideos as jest.Mock).mockResolvedValue([]);
+    (failStuckVideo as jest.Mock).mockResolvedValue(true);
+  });
+
+  describe("POST /process-video", () => {
+    const videoId = "uid-1762753390224";
+    const envelope = pubsubBody({ name: `${videoId}.mp4` });
+
+    beforeEach(() => {
+      (videoIdFromFileNames as jest.Mock).mockReturnValue(videoId);
+      (uidFromVideoId as jest.Mock).mockReturnValue("uid");
+      (processVideo as jest.Mock).mockResolvedValue(undefined);
+    });
+
+    it("transcodes once when two deliveries race, and acks both", async () => {
+      // Atomic claim: exactly one caller wins (see the claimVideoForTranscode
+      // concurrency test in firestore.test.ts for the real transaction).
+      (claimVideoForTranscode as jest.Mock)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+
+      const [first, second] = await Promise.all([
+        postJson("/process-video", envelope),
+        postJson("/process-video", envelope),
+      ]);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(claimVideoForTranscode).toHaveBeenCalledTimes(2);
+      expect(claimVideoForTranscode).toHaveBeenCalledWith(videoId, "uid");
+      expect(processVideo).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns 500 so Pub/Sub retries when the claim itself fails", async () => {
+      (claimVideoForTranscode as jest.Mock).mockRejectedValue(
+        new Error("firestore unavailable"),
+      );
+      const response = await postJson("/process-video", envelope);
+      expect(response.status).toBe(500);
+      expect(processVideo).not.toHaveBeenCalled();
+    });
   });
 
   describe("POST /transcribe-audio", () => {
@@ -515,6 +563,7 @@ describe("transcription HTTP endpoints", () => {
       };
       expect(body.skipped).toBe(true);
       expect(body.reason).toBe("transcription disabled");
+      expect(listProcessingVideos).toHaveBeenCalledTimes(1);
       expect(listTranscriptsForReconcile).not.toHaveBeenCalled();
       expect(inspectBatchRecognizeOperation).not.toHaveBeenCalled();
       expect(finalizeTranscriptFromRawObject).not.toHaveBeenCalled();
@@ -523,6 +572,101 @@ describe("transcription HTTP endpoints", () => {
         "Skipping transcript reconciliation; ENABLE_TRANSCRIPTION is false",
         expect.objectContaining({ component: "transcription" }),
       );
+    });
+
+    describe("stuck transcode sweep", () => {
+      const now = Date.now();
+      const hours = (n: number) => n * 60 * 60 * 1000;
+      const ts = (ageMs: number) => ({ toMillis: () => now - ageMs });
+
+      beforeEach(() => {
+        (listTranscriptsForReconcile as jest.Mock).mockResolvedValue([]);
+      });
+
+      it("fails a stale processing video and leaves a fresh one alone", async () => {
+        (listProcessingVideos as jest.Mock).mockResolvedValue([
+          { id: "uid-1", status: "processing", processingStartedAt: ts(hours(3)) },
+          { id: "uid-2", status: "processing", processingStartedAt: ts(hours(0.5)) },
+        ]);
+
+        const response = await postJson("/reconcile-transcripts", {});
+        const body = JSON.parse(response.text) as Record<string, number>;
+
+        expect(response.status).toBe(200);
+        expect(failStuckVideo).toHaveBeenCalledTimes(1);
+        expect(failStuckVideo).toHaveBeenCalledWith(
+          "uid-1",
+          expect.any(Number),
+          2 * 60 * 60 * 1000,
+          expect.stringContaining("Transcoding did not finish"),
+        );
+        expect(body.transcodeFailed).toBe(1);
+        expect(body.transcodeStillProcessing).toBe(1);
+        expect(body.transcodeErrors).toBe(0);
+      });
+
+      it("falls back to createdAt for videos claimed before processingStartedAt existed", async () => {
+        (listProcessingVideos as jest.Mock).mockResolvedValue([
+          { id: "uid-old", status: "processing", createdAt: ts(hours(5)) },
+        ]);
+        const response = await postJson("/reconcile-transcripts", {});
+        expect(JSON.parse(response.text).transcodeFailed).toBe(1);
+        expect(failStuckVideo).toHaveBeenCalledWith(
+          "uid-old",
+          expect.any(Number),
+          expect.any(Number),
+          expect.any(String),
+        );
+      });
+
+      it("does not count a video that finished between the listing and the transaction", async () => {
+        (listProcessingVideos as jest.Mock).mockResolvedValue([
+          { id: "uid-race", status: "processing", processingStartedAt: ts(hours(3)) },
+        ]);
+        (failStuckVideo as jest.Mock).mockResolvedValue(false);
+        const response = await postJson("/reconcile-transcripts", {});
+        const body = JSON.parse(response.text) as Record<string, number>;
+        expect(body.transcodeFailed).toBe(0);
+        expect(body.transcodeStillProcessing).toBe(1);
+      });
+
+      it("keeps sweeping when one video throws, and still reconciles transcripts", async () => {
+        (listProcessingVideos as jest.Mock).mockResolvedValue([
+          { id: "uid-bad", status: "processing", processingStartedAt: ts(hours(3)) },
+          { id: "uid-good", status: "processing", processingStartedAt: ts(hours(4)) },
+        ]);
+        (failStuckVideo as jest.Mock)
+          .mockRejectedValueOnce(new Error("txn aborted"))
+          .mockResolvedValueOnce(true);
+        const response = await postJson("/reconcile-transcripts", {});
+        const body = JSON.parse(response.text) as Record<string, number>;
+        expect(response.status).toBe(200);
+        expect(body.transcodeFailed).toBe(1);
+        expect(body.transcodeErrors).toBe(1);
+        expect(listTranscriptsForReconcile).toHaveBeenCalled();
+      });
+
+      it("still reconciles transcripts when the video listing itself fails", async () => {
+        (listProcessingVideos as jest.Mock).mockRejectedValue(new Error("boom"));
+        const response = await postJson("/reconcile-transcripts", {});
+        const body = JSON.parse(response.text) as Record<string, number>;
+        expect(response.status).toBe(200);
+        expect(body.transcodeErrors).toBe(1);
+        expect(listTranscriptsForReconcile).toHaveBeenCalled();
+      });
+
+      it("sweeps even when transcription is disabled, without touching Speech", async () => {
+        serviceConfig.enableTranscription = false;
+        (listProcessingVideos as jest.Mock).mockResolvedValue([
+          { id: "uid-1", status: "processing", processingStartedAt: ts(hours(3)) },
+        ]);
+        const response = await postJson("/reconcile-transcripts", {});
+        const body = JSON.parse(response.text) as Record<string, unknown>;
+        expect(body.skipped).toBe(true);
+        expect(body.transcodeFailed).toBe(1);
+        expect(listTranscriptsForReconcile).not.toHaveBeenCalled();
+        expect(inspectBatchRecognizeOperation).not.toHaveBeenCalled();
+      });
     });
 
     it("recovers a completed Speech job from operation.result", async () => {

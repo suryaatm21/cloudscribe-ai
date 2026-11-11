@@ -105,7 +105,7 @@ describe("processVideo", () => {
       "gs://atmuri-yt-audio-work/user123-1762753390224.flac",
     );
     (deleteAudioWorkFile as jest.Mock).mockResolvedValue(undefined);
-    (createTranscript as jest.Mock).mockResolvedValue(undefined);
+    (createTranscript as jest.Mock).mockResolvedValue(true);
     (publishTranscriptionJob as jest.Mock).mockResolvedValue("mid-1");
 
     await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
@@ -134,6 +134,28 @@ describe("processVideo", () => {
     });
   });
 
+  it("does not publish or touch status when the transcript already exists", async () => {
+    serviceConfig.enableTranscription = true;
+    (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
+    (convertVideo as jest.Mock).mockResolvedValue(undefined);
+    (uploadProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
+    (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    (extractAudio as jest.Mock).mockResolvedValue(undefined);
+    (uploadAudioForTranscription as jest.Mock).mockResolvedValue(
+      "gs://atmuri-yt-audio-work/user123-1762753390224.flac",
+    );
+    // create() lost the race: a running transcript already owns this id.
+    (createTranscript as jest.Mock).mockResolvedValue(false);
+
+    await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
+
+    expect(createTranscript).toHaveBeenCalledTimes(1);
+    expect(publishTranscriptionJob).not.toHaveBeenCalled();
+    expect(updateTranscriptStatus).not.toHaveBeenCalled();
+    expect(deleteAudioWorkFile).not.toHaveBeenCalled();
+  });
+
   it("marks no_audio_detected when the source has no audio stream", async () => {
     serviceConfig.enableTranscription = true;
     (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
@@ -142,7 +164,7 @@ describe("processVideo", () => {
     (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
     (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
     (extractAudio as jest.Mock).mockRejectedValue(new NoAudioStreamError());
-    (createTranscript as jest.Mock).mockResolvedValue(undefined);
+    (createTranscript as jest.Mock).mockResolvedValue(true);
 
     await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
 

@@ -195,7 +195,7 @@ async function triggerTranscriptionPipeline(
     await extractAudio(processedFileName, audioFileName);
     const audioGcsUri = await uploadAudioForTranscription(audioFileName);
 
-    await createTranscript(videoId, transcriptId, {
+    const created = await createTranscript(videoId, transcriptId, {
       status: "pending",
       source: "batch",
       language: serviceConfig.speechToTextLanguage,
@@ -203,6 +203,17 @@ async function triggerTranscriptionPipeline(
       audioGcsUri,
       userId,
     });
+    if (!created) {
+      // Another delivery or an earlier attempt already owns this transcript.
+      // Do not publish a second job and do not touch its status: it may be
+      // running, and the audio object it points at is shared.
+      logger.warn("Transcript already exists; skipping duplicate job", {
+        component: "videoProcessor",
+        videoId,
+        transcriptId,
+      });
+      return;
+    }
 
     await publishTranscriptionJob({
       videoId,
@@ -223,6 +234,8 @@ async function triggerTranscriptionPipeline(
         videoId,
         transcriptId,
       });
+      // A false return (document already exists) is correct here too: leave the
+      // existing transcript as it is.
       await createTranscript(videoId, transcriptId, {
         status: "no_audio_detected",
         source: "batch",
