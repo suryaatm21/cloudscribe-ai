@@ -559,9 +559,6 @@ async function sweepStuckTranscodes(now: number): Promise<TranscodeSweepResult> 
   const videos = await listProcessingVideos();
   for (const video of videos) {
     const videoId = video.id;
-    if (!videoId) {
-      continue;
-    }
     if (!isTranscodeStale(video, now, staleAfterMs)) {
       result.transcodeStillProcessing += 1;
       continue;
