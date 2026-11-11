@@ -105,8 +105,9 @@ app.post("/process-video", async (req, res) => {
     // Convert video to 360p
     await processVideo(inputFileName, outputFileName, videoId);
 
-    // Mark as processed in Firestore
-    await setVideo(videoId, { status: "processed" });
+    // Mark as processed, but only while still `processing` (a late worker
+    // must not overwrite the sweeper's `failed`)
+    await finishVideoIfProcessing(videoId, { status: "processed" });
   }
 
   // Return 200 OK so Pub/Sub knows message was delivered
