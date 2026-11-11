@@ -39,7 +39,8 @@ build-minute tier. Timeouts are sized for that, not for 8 vCPU. Do not lower the
 all three are gated: `/process-video` (publishes jobs), `/transcribe-audio` (the only
 caller of `batchRecognize`), and `/reconcile-transcripts` (the sweeper). The sweeper was
 missed on the first pass and Cloud Scheduler hits it every 15 minutes — if a new entry
-point is added, gate it.
+point is added, gate it. The sweeper's stuck-transcode step is the one ungated part: it
+only reads and writes Firestore and spends nothing.
 
 **Pub/Sub push only treats 2xx as an ack.** A permanently-unprocessable message must
 return 200 after logging, or it retries to the dead-letter limit. Reserve non-2xx for
@@ -50,8 +51,9 @@ no audio stream (caught by an `ffprobe` pre-check) and a file whose audio contai
 speech (caught by the parser) are both valid lectures with nothing to quote. Do not
 collapse either into `failed`.
 
-**Duplicate billing is prevented by an atomic Firestore claim.** Only `pending` may
-become `running`. `failed` and `needs_review` are terminal and never auto-retry.
+**Duplicate billing is prevented by atomic Firestore writes.** Transcode is claimed in a
+transaction (`claimVideoForTranscode`), the transcript job document is made with
+`create()` (never `set` with merge), and only `pending` may become `running`. `failed` and `needs_review` are terminal and never auto-retry.
 `needs_review` exists for the case where Speech may have accepted a job but we could not
 record it — that ambiguity is unresolvable from our side, so it waits for a human.
 

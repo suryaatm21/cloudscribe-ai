@@ -100,11 +100,8 @@ app.post("/process-video", async (req, res) => {
   // Pub/Sub sends the message here
   const data = decodePubSubMessage(req); // Extract file name
 
-  // Verify video is new (not already processed)
-  if (await isVideoNew(videoId)) {
-    // Mark as processing in Firestore
-    await setVideo(videoId, { status: "processing" });
-
+  // Atomically claim the video: only the first delivery gets true
+  if (await claimVideoForTranscode(videoId, userId)) {
     // Convert video to 360p
     await processVideo(inputFileName, outputFileName, videoId);
 

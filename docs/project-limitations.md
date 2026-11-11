@@ -3,7 +3,7 @@
 ## Pub/Sub Processing & Acknowledgement
 
 - **Current:** Pub/Sub expects an HTTP ack within 600s (10 min). If Cloud Run takes longer, the HTTP connection closes, but Cloud Run may still write to Firestore and Storage.
-- **Tradeoff:** If processing exceeds 10 min, Pub/Sub will retry the message. This can cause duplicate processing and inconsistent Firestore state.
+- **Tradeoff:** If processing exceeds 10 min, Pub/Sub will retry the message. A redelivery is acked without transcoding (the video is already claimed), and a video whose worker died stays `processing` until `/reconcile-transcripts` marks it `failed` after `TRANSCODE_STALE_AFTER_MS`.
 - **Potential Solutions:**
   - Switch to a **pull subscription** so Cloud Run can ack after processing (more control, but more infra to manage).
   - Use a **dead letter topic** for messages that fail repeatedly.
@@ -56,7 +56,7 @@
   Firestore omits documents that are missing the ordered field entirely, so a video
   without `createdAt` is *invisible* rather than merely unsorted. Two writers keep this
   invariant: the `finalizeUpload` callable sets it at upload time, and
-  `setVideoEnsuringCreatedAt` in the worker backfills it if that call was lost. Both
+  the worker (`claimVideoForTranscode`, `setVideoEnsuringCreatedAt`) backfills it if that call was lost. Both
   derive the value from the `{uid}-{epochMillis}` video id, so they agree regardless of
   which one writes first. `scripts/backfill-video-created-at.sh` repaired the documents
   that predated this.
@@ -73,9 +73,9 @@
   abandoned upload. Consequence: if the tab closes between the upload completing and
   `finalizeUpload` returning, the video still processes but keeps its filename-derived
   display name.
-- **`finalizeUpload` must not write `status`.** The worker's idempotency guard
-  (`isVideoNew`) treats a missing status as "not yet processed"; setting a status at
-  upload time would make the worker skip transcoding for every upload.
+- **`finalizeUpload` must not write `status`.** The worker's atomic claim
+  (`claimVideoForTranscode`) treats a missing status as "not yet claimed"; setting a
+  status at upload time would make the worker skip transcoding for every upload.
 
 ## Continuous Deployment 
 
