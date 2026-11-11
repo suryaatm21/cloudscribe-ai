@@ -56,8 +56,8 @@
   Firestore omits documents that are missing the ordered field entirely, so a video
   without `createdAt` is *invisible* rather than merely unsorted. Two writers keep this
   invariant: the `finalizeUpload` callable sets it at upload time, and
-  the worker (`claimVideoForTranscode`, `setVideoEnsuringCreatedAt`) backfills it if that call was lost. Both
-  derive the value from the `{uid}-{epochMillis}` video id, so they agree regardless of
+  the worker (`claimVideoForTranscode`, `finishVideoIfProcessing`) backfills it if that
+  call was lost. Both derive the value from the `{uid}-{epochMillis}` video id, so they agree regardless of
   which one writes first. `scripts/backfill-video-created-at.sh` repaired the documents
   that predated this.
 - **Query requires a composite index:** `videos(uid ASC, createdAt DESC)`, declared in
