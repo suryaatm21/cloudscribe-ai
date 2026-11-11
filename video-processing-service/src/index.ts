@@ -6,10 +6,12 @@ import {
 } from "./storage";
 import {
   claimTranscriptJob,
+  claimVideoForTranscode,
+  failStuckVideo,
   getTranscript,
-  isVideoNew,
+  isTranscodeStale,
+  listProcessingVideos,
   listTranscriptsForReconcile,
-  setVideoEnsuringCreatedAt,
   timestampToMillis,
   updateTranscript,
   updateTranscriptStatus,
@@ -145,9 +147,23 @@ app.post(
       return;
     }
 
-    // Only process video if it's new, otherwise skip to avoid duplicates
-    // Return 200 (not 400) so Pub/Sub doesn't retry already-processed videos
-    if (!(await isVideoNew(videoId))) {
+    // Claim the video atomically so two near-simultaneous deliveries cannot
+    // both transcode. Return 200 (not 400) so Pub/Sub doesn't retry videos that
+    // are already processed or being processed.
+    let claimed: boolean;
+    try {
+      claimed = await claimVideoForTranscode(videoId, userId);
+    } catch (claimError) {
+      // Transient Firestore failure: nothing was claimed, so let Pub/Sub retry.
+      logger.error("Failed to claim video for processing", {
+        jobId: videoId,
+        component: "videoProcessor",
+        error: claimError instanceof Error ? claimError.message : claimError,
+      });
+      res.status(500).send("Video claim failed");
+      return;
+    }
+    if (!claimed) {
       sendSuccessResponse(
         res,
         "Video already processed or processing - skipping",
@@ -158,12 +174,6 @@ app.post(
       });
       return;
     }
-
-    await setVideoEnsuringCreatedAt(videoId, {
-      id: videoId,
-      uid: userId,
-      status: "processing",
-    });
 
     try {
       await processVideo(inputFileName, outputFileName, videoId, userId);
@@ -521,9 +531,93 @@ app.post(
   },
 );
 
+interface TranscodeSweepResult {
+  transcodeFailed: number;
+  transcodeStillProcessing: number;
+  transcodeErrors: number;
+}
+
+// Must stay above the 3600 s Cloud Run request timeout so the sweeper can never
+// fail a transcode that is still running; raise it if that timeout is raised.
+const TRANSCODE_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Fails videos stuck in `processing` after the worker died mid-transcode.
+ *
+ * Fails rather than retries: nothing redelivers a raw-video message once its
+ * request is gone, and re-transcoding inline would hold this request (and the
+ * single Cloud Run instance) for up to an hour. A failed video is visible to
+ * its owner, who can re-upload.
+ *
+ * Firestore reads and writes only: no Speech call and no Pub/Sub publish, so
+ * it is safe to run while ENABLE_TRANSCRIPTION is false. A listing failure
+ * propagates to the caller; a per-video failure is counted and the sweep goes on.
+ */
+async function sweepStuckTranscodes(now: number): Promise<TranscodeSweepResult> {
+  const staleAfterMs = TRANSCODE_STALE_AFTER_MS;
+  const result: TranscodeSweepResult = {
+    transcodeFailed: 0,
+    transcodeStillProcessing: 0,
+    transcodeErrors: 0,
+  };
+  const videos = await listProcessingVideos();
+  for (const video of videos) {
+    const videoId = video.id;
+    if (!isTranscodeStale(video, now, staleAfterMs)) {
+      result.transcodeStillProcessing += 1;
+      continue;
+    }
+    try {
+      const applied = await failStuckVideo(
+        videoId,
+        now,
+        staleAfterMs,
+        "Transcoding did not finish; the worker likely stopped mid-transcode",
+      );
+      if (applied) {
+        result.transcodeFailed += 1;
+        logger.warn("Failed a video stuck in processing", {
+          component: "videoProcessor",
+          jobId: videoId,
+          staleAfterMs,
+        });
+      } else {
+        // Finished (or was otherwise changed) between listing and the transaction.
+        result.transcodeStillProcessing += 1;
+      }
+    } catch (error) {
+      result.transcodeErrors += 1;
+      logger.error("Failed to fail stuck video; continuing sweep", {
+        component: "videoProcessor",
+        jobId: videoId,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
+  }
+  return result;
+}
+
 app.post(
   "/reconcile-transcripts",
   async (_req: Request, res: Response): Promise<void> => {
+    // The transcode sweep runs before the ENABLE_TRANSCRIPTION gate: stuck
+    // transcodes happen whether or not transcription is on, and the sweep spends
+    // nothing. Everything below the gate (Speech inspection) stays gated.
+    let transcodeSweep: TranscodeSweepResult = {
+      transcodeFailed: 0,
+      transcodeStillProcessing: 0,
+      transcodeErrors: 0,
+    };
+    try {
+      transcodeSweep = await sweepStuckTranscodes(Date.now());
+    } catch (sweepError) {
+      transcodeSweep.transcodeErrors += 1;
+      logger.error("Stuck-transcode sweep failed", {
+        component: "videoProcessor",
+        error: sweepError instanceof Error ? sweepError.message : sweepError,
+      });
+    }
+
     if (!serviceConfig.enableTranscription) {
       logger.info(
         "Skipping transcript reconciliation; ENABLE_TRANSCRIPTION is false",
@@ -533,6 +627,7 @@ app.post(
       res.status(200).json({
         skipped: true,
         reason: "transcription disabled",
+        ...transcodeSweep,
       });
       return;
     }
@@ -798,6 +893,7 @@ app.post(
         needsReview,
         noAudioDetected,
         errors,
+        ...transcodeSweep,
       });
     } catch (error) {
       logger.error("Transcript reconciliation failed", {

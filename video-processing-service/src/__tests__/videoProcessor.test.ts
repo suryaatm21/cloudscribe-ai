@@ -1,7 +1,11 @@
-import { processVideo, uidFromVideoId, videoIdFromFileNames } from "../videoProcessor";
+import {
+  processVideo,
+  uidFromVideoId,
+  videoIdFromFileNames,
+} from "../videoProcessor";
 import {
   createTranscript,
-  setVideoEnsuringCreatedAt,
+  finishVideoIfProcessing,
   updateTranscriptStatus,
 } from "../firestore";
 import {
@@ -20,7 +24,7 @@ import { serviceConfig } from "../config";
 
 jest.mock("../firestore", () => ({
   setVideo: jest.fn(),
-  setVideoEnsuringCreatedAt: jest.fn(),
+  finishVideoIfProcessing: jest.fn(),
   createTranscript: jest.fn(),
   updateTranscriptStatus: jest.fn(),
 }));
@@ -69,6 +73,10 @@ describe("processVideo", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     serviceConfig.enableTranscription = false;
+    (finishVideoIfProcessing as jest.Mock).mockResolvedValue({
+      applied: true,
+      status: "processing",
+    });
   });
 
   it("processes video successfully on first attempt", async () => {
@@ -82,7 +90,7 @@ describe("processVideo", () => {
       processVideo("input.mp4", "processed-input.mp4", videoId, userId),
     ).resolves.toBeUndefined();
 
-    expect(setVideoEnsuringCreatedAt).toHaveBeenCalledWith(videoId, {
+    expect(finishVideoIfProcessing).toHaveBeenCalledWith(videoId, {
       status: "processed",
       filename: "processed-input.mp4",
       uid: userId,
@@ -105,7 +113,7 @@ describe("processVideo", () => {
       "gs://atmuri-yt-audio-work/user123-1762753390224.flac",
     );
     (deleteAudioWorkFile as jest.Mock).mockResolvedValue(undefined);
-    (createTranscript as jest.Mock).mockResolvedValue(undefined);
+    (createTranscript as jest.Mock).mockResolvedValue(true);
     (publishTranscriptionJob as jest.Mock).mockResolvedValue("mid-1");
 
     await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
@@ -134,6 +142,28 @@ describe("processVideo", () => {
     });
   });
 
+  it("does not publish or touch status when the transcript already exists", async () => {
+    serviceConfig.enableTranscription = true;
+    (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
+    (convertVideo as jest.Mock).mockResolvedValue(undefined);
+    (uploadProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
+    (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    (extractAudio as jest.Mock).mockResolvedValue(undefined);
+    (uploadAudioForTranscription as jest.Mock).mockResolvedValue(
+      "gs://atmuri-yt-audio-work/user123-1762753390224.flac",
+    );
+    // create() lost the race: a running transcript already owns this id.
+    (createTranscript as jest.Mock).mockResolvedValue(false);
+
+    await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
+
+    expect(createTranscript).toHaveBeenCalledTimes(1);
+    expect(publishTranscriptionJob).not.toHaveBeenCalled();
+    expect(updateTranscriptStatus).not.toHaveBeenCalled();
+    expect(deleteAudioWorkFile).not.toHaveBeenCalled();
+  });
+
   it("marks no_audio_detected when the source has no audio stream", async () => {
     serviceConfig.enableTranscription = true;
     (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
@@ -142,7 +172,7 @@ describe("processVideo", () => {
     (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
     (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
     (extractAudio as jest.Mock).mockRejectedValue(new NoAudioStreamError());
-    (createTranscript as jest.Mock).mockResolvedValue(undefined);
+    (createTranscript as jest.Mock).mockResolvedValue(true);
 
     await processVideo("input.mp4", "processed-input.mp4", videoId, userId);
 
@@ -202,11 +232,119 @@ describe("processVideo", () => {
       processVideo("input.mp4", "processed-input.mp4", videoId, userId),
     ).rejects.toThrow("transient failure");
 
-    expect(setVideoEnsuringCreatedAt).toHaveBeenLastCalledWith(videoId, {
+    expect(finishVideoIfProcessing).toHaveBeenLastCalledWith(videoId, {
       status: "failed",
       uid: userId,
     });
     expect(downloadRawVideo).toHaveBeenCalledTimes(2);
+  });
+
+  describe("conditional terminal writes", () => {
+    beforeEach(() => {
+      (downloadRawVideo as jest.Mock).mockResolvedValue(undefined);
+      (convertVideo as jest.Mock).mockResolvedValue(undefined);
+      (uploadProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+      (deleteRawVideo as jest.Mock).mockResolvedValue(undefined);
+      (deleteProcessedVideo as jest.Mock).mockResolvedValue(undefined);
+    });
+
+    it("discards a late success without transcribing when the sweeper already failed the video", async () => {
+      (finishVideoIfProcessing as jest.Mock).mockResolvedValue({
+        applied: false,
+        status: "failed",
+      });
+
+      await expect(
+        processVideo("input.mp4", "processed-input.mp4", videoId, userId),
+      ).resolves.toBeUndefined();
+
+      expect(finishVideoIfProcessing).toHaveBeenCalledTimes(1);
+      expect(extractAudio).not.toHaveBeenCalled();
+      expect(createTranscript).not.toHaveBeenCalled();
+      expect(publishTranscriptionJob).not.toHaveBeenCalled();
+      expect(deleteRawVideo).toHaveBeenCalledWith("input.mp4");
+    });
+
+    describe("retry after this request already marked the video processed", () => {
+      const alreadyProcessed = { applied: false, status: "processed" };
+
+      beforeEach(() => {
+        serviceConfig.enableTranscription = true;
+        (extractAudio as jest.Mock).mockResolvedValue(undefined);
+        (uploadAudioForTranscription as jest.Mock).mockResolvedValue(
+          "gs://atmuri-yt-audio-work/user123-1762753390224.flac",
+        );
+        (deleteAudioWorkFile as jest.Mock).mockResolvedValue(undefined);
+        (publishTranscriptionJob as jest.Mock).mockResolvedValue("mid-1");
+        // Attempt 1 applies the write; the retry finds its own `processed`.
+        (finishVideoIfProcessing as jest.Mock)
+          .mockResolvedValueOnce({ applied: true, status: "processing" })
+          .mockResolvedValue(alreadyProcessed);
+      });
+
+      it("still saves the no_audio_detected transcript when the first save throws", async () => {
+        (extractAudio as jest.Mock).mockRejectedValue(new NoAudioStreamError());
+        (createTranscript as jest.Mock)
+          .mockRejectedValueOnce(new Error("firestore unavailable"))
+          .mockResolvedValueOnce(true);
+
+        await expect(
+          processVideo("input.mp4", "processed-input.mp4", videoId, userId),
+        ).resolves.toBeUndefined();
+
+        expect(createTranscript).toHaveBeenCalledTimes(2);
+        expect(createTranscript).toHaveBeenLastCalledWith(
+          videoId,
+          "primary",
+          expect.objectContaining({ status: "no_audio_detected" }),
+        );
+        expect(publishTranscriptionJob).not.toHaveBeenCalled();
+      });
+
+      it("reaches createTranscript again but publishes exactly once when cleanup fails after the job was queued", async () => {
+        (createTranscript as jest.Mock)
+          .mockResolvedValueOnce(true) // attempt 1 creates the job
+          .mockResolvedValue(false); // the retry finds it already exists
+        (deleteRawVideo as jest.Mock)
+          .mockRejectedValueOnce(new Error("disk busy"))
+          .mockResolvedValue(undefined);
+
+        await expect(
+          processVideo("input.mp4", "processed-input.mp4", videoId, userId),
+        ).resolves.toBeUndefined();
+
+        expect(createTranscript).toHaveBeenCalledTimes(2);
+        expect(publishTranscriptionJob).toHaveBeenCalledTimes(1);
+      });
+
+      it("does not record a failure over the already processed video if every attempt fails", async () => {
+        (createTranscript as jest.Mock).mockResolvedValue(true);
+        (deleteRawVideo as jest.Mock).mockRejectedValue(new Error("disk busy"));
+
+        await expect(
+          processVideo("input.mp4", "processed-input.mp4", videoId, userId),
+        ).rejects.toThrow("disk busy");
+
+        // Only the failed-status write attempt follows the first processed write;
+        // finishVideoIfProcessing refuses it because the video is processed.
+        expect(finishVideoIfProcessing).toHaveBeenLastCalledWith(videoId, {
+          status: "failed",
+          uid: userId,
+        });
+      });
+    });
+
+    it("still throws the processing error when a late failure write is rejected", async () => {
+      (downloadRawVideo as jest.Mock).mockRejectedValue(new Error("boom"));
+      (finishVideoIfProcessing as jest.Mock).mockResolvedValue({
+        applied: false,
+        status: "failed",
+      });
+
+      await expect(
+        processVideo("input.mp4", "processed-input.mp4", videoId, userId),
+      ).rejects.toThrow("boom");
+    });
   });
 });
 

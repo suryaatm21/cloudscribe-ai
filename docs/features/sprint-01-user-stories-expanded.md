@@ -18,7 +18,7 @@ As a student, I want my uploaded videos to be processed reliably in the backgrou
 **Notes for You:**
 
 - **Why it matters**: Pub/Sub can retry messages infinitely; without deduplication logic, the same video could be processed multiple times, creating duplicates in Firestore and GCS.
-- **Current implementation**: `video-processing-service` checks `isVideoNew()` in Firestore before processing. If a video is already being processed, it returns 200 (success) to Pub/Sub to prevent retries.
+- **Current implementation**: `video-processing-service` atomically claims the video in Firestore (`claimVideoForTranscode`) before processing. If a video is already being processed, it returns 200 (success) to Pub/Sub to prevent retries.
 - **Tradeoff**: Push subscriptions have a 600s (10 min) timeout. If processing takes longer, the HTTP connection closes but Cloud Run may still write to storage. We accept potential duplicate processing in exchange for a simpler architecture vs. pull subscriptions (which require more infra).
 - **Next**: For Sprint 2 (transcription), Speech-to-Text v2 may take 5-30 min depending on video length. Plan to move to Cloud Tasks or Firestore transaction-based locking for longer jobs.
 

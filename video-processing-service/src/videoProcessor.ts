@@ -12,7 +12,7 @@ import {
 import { Timestamp } from "firebase-admin/firestore";
 import {
   createTranscript,
-  setVideoEnsuringCreatedAt,
+  finishVideoIfProcessing,
   updateTranscriptStatus,
 } from "./firestore";
 import { serviceConfig } from "./config";
@@ -56,11 +56,32 @@ export async function processVideo(
       await convertVideo(inputFileName, outputFileName);
       await uploadProcessedVideo(outputFileName);
 
-      await setVideoEnsuringCreatedAt(videoId, {
+      const finished = await finishVideoIfProcessing(videoId, {
         status: "processed",
         filename: outputFileName,
         uid: userId,
       });
+      if (!finished.applied) {
+        if (finished.status !== "processed") {
+          // `failed` means the stuck-transcode sweeper took this video; a late
+          // result must not overwrite it.
+          logger.warn("Video no longer processing; discarding late result", {
+            jobId: videoId,
+            component: "videoProcessor",
+            status: finished.status,
+          });
+          await cleanupFiles(inputFileName, outputFileName);
+          return;
+        }
+        // `processed` is this request's own earlier attempt: it failed after
+        // that write (transcript step, cleanup). Carry on so the retry still
+        // reaches the transcript work; create() keeps that duplicate-safe.
+        logger.info("Video already processed by an earlier attempt; continuing", {
+          jobId: videoId,
+          component: "videoProcessor",
+          attempt,
+        });
+      }
 
       if (serviceConfig.enableTranscription) {
         await triggerTranscriptionPipeline(videoId, outputFileName, userId);
@@ -100,11 +121,20 @@ export async function processVideo(
 
   // Also ensures createdAt: a failed video the owner cannot see is worse than
   // a failed video they can.
-  await setVideoEnsuringCreatedAt(videoId, { status: "failed", uid: userId });
   const errorToThrow =
     lastError instanceof Error
       ? lastError
       : new Error("Video processing failed after retries");
+  const failedResult = await finishVideoIfProcessing(videoId, {
+    status: "failed",
+    uid: userId,
+  });
+  if (!failedResult.applied) {
+    logger.warn("Video no longer processing; not recording failure", {
+      jobId: videoId,
+      component: "videoProcessor",
+    });
+  }
   logger.error("Exhausted video processing attempts", {
     jobId: videoId,
     component: "videoProcessor",
@@ -195,7 +225,7 @@ async function triggerTranscriptionPipeline(
     await extractAudio(processedFileName, audioFileName);
     const audioGcsUri = await uploadAudioForTranscription(audioFileName);
 
-    await createTranscript(videoId, transcriptId, {
+    const created = await createTranscript(videoId, transcriptId, {
       status: "pending",
       source: "batch",
       language: serviceConfig.speechToTextLanguage,
@@ -203,6 +233,17 @@ async function triggerTranscriptionPipeline(
       audioGcsUri,
       userId,
     });
+    if (!created) {
+      // Another delivery or an earlier attempt already owns this transcript.
+      // Do not publish a second job and do not touch its status: it may be
+      // running, and the audio object it points at is shared.
+      logger.warn("Transcript already exists; skipping duplicate job", {
+        component: "videoProcessor",
+        videoId,
+        transcriptId,
+      });
+      return;
+    }
 
     await publishTranscriptionJob({
       videoId,
@@ -223,6 +264,8 @@ async function triggerTranscriptionPipeline(
         videoId,
         transcriptId,
       });
+      // A false return (document already exists) is correct here too: leave the
+      // existing transcript as it is.
       await createTranscript(videoId, transcriptId, {
         status: "no_audio_detected",
         source: "batch",
