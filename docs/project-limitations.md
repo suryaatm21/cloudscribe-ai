@@ -3,7 +3,7 @@
 ## Pub/Sub Processing & Acknowledgement
 
 - **Current:** Pub/Sub expects an HTTP ack within 600s (10 min). If Cloud Run takes longer, the HTTP connection closes, but Cloud Run may still write to Firestore and Storage.
-- **Tradeoff:** If processing exceeds 10 min, Pub/Sub will retry the message. A redelivery is acked without transcoding (the video is already claimed), and a video whose worker died stays `processing` until `/reconcile-transcripts` marks it `failed` after `TRANSCODE_STALE_AFTER_MS`.
+- **Tradeoff:** If processing exceeds 10 min, Pub/Sub will retry the message. A redelivery is acked without transcoding (the video is already claimed), and a video whose worker died stays `processing` until `/reconcile-transcripts` marks it `failed` after 2 hours.
 - **Potential Solutions:**
   - Switch to a **pull subscription** so Cloud Run can ack after processing (more control, but more infra to manage).
   - Use a **dead letter topic** for messages that fail repeatedly.

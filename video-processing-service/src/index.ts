@@ -537,6 +537,10 @@ interface TranscodeSweepResult {
   transcodeErrors: number;
 }
 
+// Must stay above the 3600 s Cloud Run request timeout so the sweeper can never
+// fail a transcode that is still running; raise it if that timeout is raised.
+const TRANSCODE_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+
 /**
  * Fails videos stuck in `processing` after the worker died mid-transcode.
  *
@@ -550,7 +554,7 @@ interface TranscodeSweepResult {
  * propagates to the caller; a per-video failure is counted and the sweep goes on.
  */
 async function sweepStuckTranscodes(now: number): Promise<TranscodeSweepResult> {
-  const staleAfterMs = serviceConfig.transcodeStaleAfterMs;
+  const staleAfterMs = TRANSCODE_STALE_AFTER_MS;
   const result: TranscodeSweepResult = {
     transcodeFailed: 0,
     transcodeStillProcessing: 0,

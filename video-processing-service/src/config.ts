@@ -30,11 +30,6 @@ interface IServiceConfig {
   speechProcessingStrategy: SpeechProcessingStrategy;
   processingMaxAttempts: number;
   reconcileStaleAfterMs: number;
-  /**
-   * How long a video may stay `processing` before the sweeper fails it. Never
-   * below `MIN_TRANSCODE_STALE_AFTER_MS`; see `parseTranscodeStaleAfterMs`.
-   */
-  transcodeStaleAfterMs: number;
   projectId?: string;
   region?: string;
   serviceName?: string;
@@ -174,42 +169,6 @@ function validateTranscriptPrefixesOrWarn(
   }
 }
 
-/**
- * Floor for `TRANSCODE_STALE_AFTER_MS`: the Cloud Run request timeout (3600 s)
- * plus a one-hour margin.
- *
- * Why a floor is enough to keep the sweeper from failing a live transcode: a
- * transcode (all `processingMaxAttempts` attempts included) runs inside a single
- * `/process-video` request, and Cloud Run ends that request at 3600 s. A claim
- * older than the timeout therefore has no live request behind it, so any bound
- * above the timeout only ever fails abandoned claims. That is why there is no
- * separate transcode deadline or claim heartbeat. If the service timeout is ever
- * raised, raise this floor with it.
- */
-export const MIN_TRANSCODE_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
-
-/**
- * Parses `TRANSCODE_STALE_AFTER_MS`. Unset means the 2 h default (equal to the
- * floor). A set value that is not a number, or is below the floor, throws at
- * process start: a too-small bound would let the 15-minute sweep fail
- * transcodes that are still running.
- */
-export function parseTranscodeStaleAfterMs(raw: string | undefined): number {
-  if (raw === undefined || raw.trim().length === 0) {
-    return MIN_TRANSCODE_STALE_AFTER_MS;
-  }
-  const parsed = Number(raw.trim());
-  if (!Number.isFinite(parsed) || parsed < MIN_TRANSCODE_STALE_AFTER_MS) {
-    throw new Error(
-      `Invalid TRANSCODE_STALE_AFTER_MS=${JSON.stringify(raw)}. ` +
-        `It must be a number of milliseconds of at least ${MIN_TRANSCODE_STALE_AFTER_MS} ` +
-        "(2 hours): the Cloud Run request timeout is 3600 s, and a smaller value " +
-        "would let the sweeper fail videos that are still transcoding.",
-    );
-  }
-  return parsed;
-}
-
 const rawTranscriptPrefix = normalizePrefix(
   getEnvVar("RAW_TRANSCRIPT_PREFIX") ?? "raw",
 );
@@ -248,9 +207,6 @@ export const serviceConfig: IServiceConfig = {
   reconcileStaleAfterMs: getNumericEnvVar(
     "RECONCILE_STALE_AFTER_MS",
     30 * 60 * 1000,
-  ),
-  transcodeStaleAfterMs: parseTranscodeStaleAfterMs(
-    getEnvVar("TRANSCODE_STALE_AFTER_MS"),
   ),
   projectId:
     getEnvVar("PROJECT_ID") ??

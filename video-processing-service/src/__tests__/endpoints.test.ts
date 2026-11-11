@@ -54,7 +54,6 @@ jest.mock("../config", () => ({
     normalizedTranscriptPrefix: "normalized",
     transcriptsBucketName: "atmuri-yt-transcripts",
     reconcileStaleAfterMs: 1,
-    transcodeStaleAfterMs: 2 * 60 * 60 * 1000,
     environment: "test",
     speechToTextLanguage: "en-US",
     speechToTextModel: "long",
