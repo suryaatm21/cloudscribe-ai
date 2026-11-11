@@ -4,20 +4,35 @@ import re
 import shlex
 import sys
 
-VERBS = {"describe", "list", "get-iam-policy"}
-GROUPS = {
-    "projects", "services", "run", "revisions", "functions", "pubsub", "topics",
-    "subscriptions", "scheduler", "jobs", "builds", "triggers", "storage",
-    "buckets", "notifications", "objects", "artifacts", "repositories",
-    "docker", "images", "iam", "service-accounts", "firestore", "databases",
-    "indexes", "composite", "logging", "metrics", "monitoring", "policies",
-    "billing", "budgets",
+ALLOWED_PATHS = {
+    ("config", "list"),
+    ("projects", "describe"), ("projects", "list"), ("projects", "get-iam-policy"),
+    ("services", "list"),
+    ("run", "services", "describe"), ("run", "services", "list"), ("run", "services", "get-iam-policy"),
+    ("run", "revisions", "describe"), ("run", "revisions", "list"),
+    ("functions", "describe"), ("functions", "list"), ("functions", "get-iam-policy"),
+    ("pubsub", "topics", "describe"), ("pubsub", "topics", "list"), ("pubsub", "topics", "get-iam-policy"),
+    ("pubsub", "subscriptions", "describe"), ("pubsub", "subscriptions", "list"), ("pubsub", "subscriptions", "get-iam-policy"),
+    ("scheduler", "jobs", "describe"), ("scheduler", "jobs", "list"),
+    ("builds", "describe"), ("builds", "list"),
+    ("builds", "triggers", "describe"), ("builds", "triggers", "list"),
+    ("storage", "buckets", "describe"), ("storage", "buckets", "list"), ("storage", "buckets", "get-iam-policy"),
+    ("storage", "buckets", "notifications", "describe"), ("storage", "buckets", "notifications", "list"),
+    ("storage", "objects", "describe"), ("storage", "objects", "list"),
+    ("artifacts", "repositories", "describe"), ("artifacts", "repositories", "list"), ("artifacts", "repositories", "get-iam-policy"),
+    ("artifacts", "docker", "images", "describe"), ("artifacts", "docker", "images", "list"),
+    ("iam", "service-accounts", "describe"), ("iam", "service-accounts", "list"), ("iam", "service-accounts", "get-iam-policy"),
+    ("firestore", "databases", "describe"), ("firestore", "databases", "list"),
+    ("firestore", "indexes", "composite", "describe"), ("firestore", "indexes", "composite", "list"),
+    ("logging", "metrics", "describe"), ("logging", "metrics", "list"),
+    ("monitoring", "policies", "describe"), ("monitoring", "policies", "list"),
+    ("billing", "budgets", "describe"), ("billing", "budgets", "list"),
 }
 SEPARATORS = {";", "&", "|", "&&", "||", "(", ")", ";;", "|&", "\n"}
 
 
 def deny(reason):
-    print(f"gcloud is read-only here (describe, list, get-iam-policy): {reason}", file=sys.stderr)
+    print(f"gcloud is limited to an allowlist of read-only commands: {reason}", file=sys.stderr)
     sys.exit(2)
 
 
@@ -29,7 +44,7 @@ def check_segment(seg):
         i += 1
     rest = seg[i:]
     if not any("gcloud" in t for t in rest):
-        return
+        return False
     if rest[0] != "gcloud":
         deny(f"gcloud not invoked directly ({rest[0]})")
     if any("gcloud" in t for t in rest[1:]):
@@ -39,13 +54,12 @@ def check_segment(seg):
         if t.startswith("-"):
             break
         pos.append(t)
-    if pos == ["config", "list"]:
-        return
-    if not pos or pos[-1] not in VERBS and (len(pos) < 2 or pos[-2] not in VERBS):
-        deny("final verb is not describe, list or get-iam-policy")
-    verb_at = len(pos) - 1 if pos[-1] in VERBS else len(pos) - 2
-    if not pos[:verb_at] or not all(g in GROUPS for g in pos[:verb_at]):
-        deny("unrecognized command group")
+    path = tuple(pos)
+    if path in ALLOWED_PATHS:
+        return True
+    if len(path) > 1 and path[:-1] in ALLOWED_PATHS and path[-2] != "list":
+        return True
+    deny("command path is not on the read-only allowlist")
 
 
 def main():
@@ -75,9 +89,14 @@ def main():
         else:
             cur.append(t)
     segments.append(cur)
-    for seg in segments:
-        if seg:
-            check_segment(seg)
+    segments = [s for s in segments if s]
+    results = [check_segment(s) for s in segments]
+    if segments and all(results):
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "read-only gcloud",
+        }}))
 
 
 main()
