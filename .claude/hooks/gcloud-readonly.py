@@ -28,7 +28,6 @@ ALLOWED_PATHS = {
     ("monitoring", "policies", "describe"), ("monitoring", "policies", "list"),
     ("billing", "budgets", "describe"), ("billing", "budgets", "list"),
 }
-SEPARATORS = {";", "&", "|", "&&", "||", "(", ")", ";;", "|&"}
 
 
 def deny(reason):
@@ -81,7 +80,7 @@ def main():
         deny("unparseable command")
     segments, cur = [], []
     for t in tokens:
-        if t in SEPARATORS or set(t) <= set(";&|()"):
+        if set(t) <= set(";&|()"):
             segments.append(cur)
             cur = []
         else:
