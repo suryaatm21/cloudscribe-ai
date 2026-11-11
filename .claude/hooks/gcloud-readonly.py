@@ -77,8 +77,10 @@ def main():
     probe = command.replace("\\", "").replace("'", "").replace('"', "").lower()
     if "gcloud" not in command.lower() and "gcloud" not in probe:
         return
-    if re.search(r"[`$<>{}]", command):
-        deny("substitution, redirection or expansion near gcloud")
+    # The tokenizer below does not treat "#" as a comment the way bash does, so a
+    # quote or a trailing backslash inside a comment could hide a second command.
+    if re.search(r"[`$<>{}#]", command):
+        deny("substitution, redirection, expansion or comment near gcloud")
     try:
         lexer = shlex.shlex(re.sub(r"[\r\n]+", " ; ", command), posix=True, punctuation_chars=True)
         lexer.whitespace_split = True

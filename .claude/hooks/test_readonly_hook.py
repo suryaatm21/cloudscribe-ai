@@ -136,6 +136,13 @@ HIDDEN_DENIED = [
     "echo $(gcloud functions delete f)",
     "echo `gcloud functions delete f`",
     "gcloud run services list \\\\\ngcloud functions delete f",
+    # Bash ends a comment at the newline, even after a trailing backslash.
+    "gcloud config list # \\\nprintf SAFE_MARKER",
+    "gcloud config list # \\\nrm -rf some-directory",
+    # A quote inside a comment must not hide the next line.
+    "gcloud config list # '\nrm -rf x\n#'",
+    "gcloud functions describe f # '\nrm -rf x\n#'",
+    "gcloud config list # just a note",
 ]
 
 # gcloud behind wrappers, env prefixes, paths, redirection, or as an argument.
