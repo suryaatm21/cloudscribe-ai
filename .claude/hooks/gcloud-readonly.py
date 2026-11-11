@@ -28,7 +28,7 @@ ALLOWED_PATHS = {
     ("monitoring", "policies", "describe"), ("monitoring", "policies", "list"),
     ("billing", "budgets", "describe"), ("billing", "budgets", "list"),
 }
-SEPARATORS = {";", "&", "|", "&&", "||", "(", ")", ";;", "|&", "\n"}
+SEPARATORS = {";", "&", "|", "&&", "||", "(", ")", ";;", "|&"}
 
 
 def deny(reason):
@@ -75,7 +75,7 @@ def main():
     if re.search(r"[`$<>{}]", command):
         deny("substitution, redirection or expansion near gcloud")
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer = shlex.shlex(re.sub(r"[\r\n]+", " ; ", command), posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
