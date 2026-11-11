@@ -1,5 +1,7 @@
 import {
   assertTranscriptOutputPrefixes,
+  MIN_TRANSCODE_STALE_AFTER_MS,
+  parseTranscodeStaleAfterMs,
   parseSpeechProcessingStrategy,
   speechApiProcessingStrategy,
 } from "../config";
@@ -147,5 +149,57 @@ describe("parseSpeechProcessingStrategy", () => {
     expect(() => parseSpeechProcessingStrategy("dynamic_batching")).toThrow(
       /Unrecognized/,
     );
+  });
+});
+
+describe("parseTranscodeStaleAfterMs", () => {
+  const twoHours = 2 * 60 * 60 * 1000;
+
+  it("defaults to 2 hours, which is the floor", () => {
+    expect(MIN_TRANSCODE_STALE_AFTER_MS).toBe(twoHours);
+    expect(parseTranscodeStaleAfterMs(undefined)).toBe(twoHours);
+    expect(parseTranscodeStaleAfterMs("  ")).toBe(twoHours);
+  });
+
+  it("accepts the floor and anything above it", () => {
+    expect(parseTranscodeStaleAfterMs(String(twoHours))).toBe(twoHours);
+    expect(parseTranscodeStaleAfterMs("86400000")).toBe(86_400_000);
+  });
+
+  it.each(["0", "1", "3600000", String(twoHours - 1), "-5", "abc", "NaN", "Infinity"])(
+    "rejects %s with a message that names the variable and the minimum",
+    (raw) => {
+      expect(() => parseTranscodeStaleAfterMs(raw)).toThrow(
+        /TRANSCODE_STALE_AFTER_MS.*at least 7200000/,
+      );
+    },
+  );
+});
+
+describe("TRANSCODE_STALE_AFTER_MS at startup", () => {
+  const original = process.env.TRANSCODE_STALE_AFTER_MS;
+
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.TRANSCODE_STALE_AFTER_MS;
+    } else {
+      process.env.TRANSCODE_STALE_AFTER_MS = original;
+    }
+    jest.resetModules();
+  });
+
+  it("fails at import on a value below the floor", () => {
+    process.env.TRANSCODE_STALE_AFTER_MS = "0";
+    jest.resetModules();
+    expect(() => jest.requireActual("../config")).toThrow(
+      /TRANSCODE_STALE_AFTER_MS/,
+    );
+  });
+
+  it("loads with the 2 hour default when unset", () => {
+    delete process.env.TRANSCODE_STALE_AFTER_MS;
+    jest.resetModules();
+    const { serviceConfig } = jest.requireActual("../config");
+    expect(serviceConfig.transcodeStaleAfterMs).toBe(2 * 60 * 60 * 1000);
   });
 });

@@ -19,7 +19,7 @@ This document captures all required environment variables, service accounts, and
 | `TRANSCRIPTS_BUCKET_NAME` | ➖ | `atmuri-yt-transcripts` | Speech result + normalized transcript bucket. Cloud Build deploys this from `_TRANSCRIPTS_BUCKET_NAME` so the worker matches provisioned infra instead of relying on the code default. |
 | `AUDIO_WORK_BUCKET_NAME` | ➖ | `atmuri-yt-audio-work` | Intermediate FLAC bucket. Cloud Build deploys this from `_AUDIO_WORK_BUCKET_NAME`. |
 | `TRANSCRIPTION_TOPIC_NAME` | ➖ | `transcription-jobs` | Pub/Sub topic `/process-video` publishes jobs to. Cloud Build deploys this from `_TRANSCRIPTION_TOPIC_NAME`. |
-| `TRANSCODE_STALE_AFTER_MS` | ➖ | `7200000` (2 h) | How long a video may stay `processing` before `/reconcile-transcripts` marks it `failed` (the worker died mid-transcode). Must exceed the Cloud Run request timeout (3600 s) or live transcodes get failed. Not set by Cloud Build; the code default applies. |
+| `TRANSCODE_STALE_AFTER_MS` | ➖ | `7200000` (2 h) | How long a video may stay `processing` before `/reconcile-transcripts` marks it `failed` (the worker died mid-transcode). Minimum `7200000` (2 h); a smaller or non-numeric value refuses to start the service. A transcode lives inside one request that Cloud Run ends at 3600 s, so a bound above that never fails a live transcode. Not set by Cloud Build; the code default applies. |
 | `NODE_ENV` | ➖ | `development` | Used for logging context |
 | `GOOGLE_APPLICATION_CREDENTIALS` | ➖ | – | Path to service account JSON when running locally |
 | `SMOKE_ID_TOKEN` | ➖ | – | Firebase ID token for smoke test authentication |
